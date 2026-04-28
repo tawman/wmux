@@ -89,6 +89,11 @@ interface PtyEntry {
   pty: pty.IPty;
   dataListeners: Set<(data: string) => void>;
   exitListeners: Set<(code: number) => void>;
+  // Serial queue: long writes are split into ConPTY-friendly chunks and
+  // appended here so concurrent calls cannot interleave inside a single paste.
+  writeChain: Promise<void>;
+  pendingChunks: number;
+  alive: boolean;
 }
 
 export interface CreateOptions {
@@ -104,6 +109,13 @@ export interface CreateOptions {
 
 export class PtyManager {
   private ptys = new Map<SurfaceId, PtyEntry>();
+
+  // ConPTY's input pipe silently drops bytes when a single write outruns the
+  // foreground process. Splitting at ~1 KB keeps every chunk well under the
+  // pipe buffer; setImmediate between chunks lets ConPTY drain without adding
+  // perceptible latency.
+  private static readonly CHUNK_THRESHOLD = 1024;
+  private static readonly CHUNK_SIZE = 1024;
 
   create(options: CreateOptions): { id: SurfaceId; shell: string } {
     const id: SurfaceId = options.surfaceId ?? `surf-${uuidv4()}` as SurfaceId;
@@ -149,6 +161,9 @@ export class PtyManager {
       pty: ptyProcess,
       dataListeners: new Set(),
       exitListeners: new Set(),
+      writeChain: Promise.resolve(),
+      pendingChunks: 0,
+      alive: true,
     };
 
     ptyProcess.onData((data) => {
@@ -158,6 +173,7 @@ export class PtyManager {
     });
 
     ptyProcess.onExit(({ exitCode }) => {
+      entry.alive = false; // stops any in-flight chunked write
       for (const listener of entry.exitListeners) {
         listener(exitCode);
       }
@@ -170,9 +186,50 @@ export class PtyManager {
 
   write(id: SurfaceId, data: string): void {
     const entry = this.ptys.get(id);
-    if (entry) {
-      entry.pty.write(data);
+    if (!entry || !entry.alive || data.length === 0) return;
+
+    // Fast path: single keystrokes, control sequences, short responses bypass
+    // the queue entirely so typing latency is unchanged.
+    if (data.length <= PtyManager.CHUNK_THRESHOLD && entry.pendingChunks === 0) {
+      try {
+        entry.pty.write(data);
+      } catch {
+        // pty was killed between get() and write()
+      }
+      return;
     }
+
+    // Slow path: long paste — enqueue behind any in-flight chunked writes so
+    // their bytes can't interleave.
+    entry.pendingChunks++;
+    entry.writeChain = entry.writeChain
+      .then(() => this.writeChunked(entry, data))
+      .finally(() => {
+        entry.pendingChunks = Math.max(0, entry.pendingChunks - 1);
+      });
+  }
+
+  private writeChunked(entry: PtyEntry, data: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let offset = 0;
+      const writeNext = () => {
+        if (!entry.alive || offset >= data.length) {
+          resolve();
+          return;
+        }
+        const end = Math.min(offset + PtyManager.CHUNK_SIZE, data.length);
+        try {
+          entry.pty.write(data.slice(offset, end));
+        } catch {
+          // pty disposed mid-paste — abandon the rest silently
+          resolve();
+          return;
+        }
+        offset = end;
+        setImmediate(writeNext);
+      };
+      writeNext();
+    });
   }
 
   resize(id: SurfaceId, cols: number, rows: number): void {
@@ -185,6 +242,7 @@ export class PtyManager {
   kill(id: SurfaceId): void {
     const entry = this.ptys.get(id);
     if (entry) {
+      entry.alive = false; // signals any in-flight chunked write to stop
       try {
         entry.pty.kill();
       } catch {

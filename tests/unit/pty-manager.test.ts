@@ -54,6 +54,21 @@ describe('PtyManager', () => {
     expect(() => manager.write(id, 'echo hello\r')).not.toThrow();
   });
 
+  it('write of a large payload (>1KB) does not throw and is processed via the chunked queue', async () => {
+    const manager = makeManager();
+    const id = manager.create({
+      shell: TEST_SHELL,
+      cwd: process.env.USERPROFILE || 'C:\\',
+      env: TEST_ENV,
+    });
+    // 8 KiB payload — would have flooded ConPTY's input buffer in one shot
+    // before the per-PTY chunked write queue was added.
+    const big = 'x'.repeat(8 * 1024);
+    expect(() => manager.write(id, big)).not.toThrow();
+    // Yield long enough for setImmediate-driven chunks to drain.
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
   it('resize does not throw', () => {
     const manager = makeManager();
     const id = manager.create({
