@@ -24,7 +24,8 @@ export interface ClaudeActivity {
   activeSkill: string | null;
   lastTool: string | null;
   lastUpdate: number;
-  isDone: boolean; // true after "Baked for" / "Cost:" — Claude finished responding
+  isDone: boolean;    // true after "Baked for" / "Cost:" — Claude finished responding
+  isDoneAt: number | null; // timestamp when isDone last became true (for TTL expiry)
 }
 
 const activities = new Map<SurfaceId, ClaudeActivity>();
@@ -44,18 +45,20 @@ const PATTERNS = {
   // "Skill(name)" or "Skill(ns:name)"
   skillLoad: /Skill\(([^)]+)\)/,
 
-  // "● Bash(...)" or "● plugin:name:tool (MCP)"
-  toolUse: /●\s*(Bash|Read|Write|Edit|Grep|Glob|Agent|WebSearch|WebFetch)\s*\(/,
-  mcpTool: /●\s*plugin:([^:]+):([^\s]+)/,
+  // "● Bash(...)" / "⏩ Bash(...)" — various bullet styles Claude Code uses
+  toolUse: /[●⏩▸◆]\s*(Bash|Read|Write|Edit|Grep|Glob|Agent|WebSearch|WebFetch|LSP|Task)\s*\(/i,
+  mcpTool: /[●⏩▸◆]\s*plugin:([^:]+):([^\s]+)/,
+  // "⎿  …" tool result lines mean a tool is actively running
+  toolResult: /^[⎿⎾]/,
 
-  // "✻ Baked for 3m 10s" or "✻ Cost: $0.05" — Claude finished responding
-  responseDone: /✻\s*(Baked for|Cost:)/,
+  // "✻ Baked for 3m 10s" / "✻ Cost: $0.05" / alt chars — Claude finished responding
+  responseDone: /[✻✦⏎]\s*(Baked for|Cost:|Tokens:)/,
 };
 
 function getOrCreate(surfaceId: SurfaceId): ClaudeActivity {
   let activity = activities.get(surfaceId);
   if (!activity) {
-    activity = { agents: [], activeSkill: null, lastTool: null, lastUpdate: Date.now(), isDone: false };
+    activity = { agents: [], activeSkill: null, lastTool: null, lastUpdate: Date.now(), isDone: false, isDoneAt: null };
     activities.set(surfaceId, activity);
   }
   return activity;
@@ -79,6 +82,7 @@ export function observePtyData(surfaceId: SurfaceId, data: string): void {
     // Response done ("✻ Baked for …" / "✻ Cost: …")
     if (PATTERNS.responseDone.test(trimmed)) {
       activity.isDone = true;
+      activity.isDoneAt = Date.now();
       activity.lastTool = null;
       activity.activeSkill = null;
       changed = true;
@@ -90,6 +94,7 @@ export function observePtyData(surfaceId: SurfaceId, data: string): void {
     if (batchMatch) {
       activity.agents = [];
       activity.isDone = false;
+      activity.isDoneAt = null;
       changed = true;
       continue;
     }
@@ -145,6 +150,7 @@ export function observePtyData(surfaceId: SurfaceId, data: string): void {
     if (toolMatch) {
       activity.lastTool = toolMatch[1];
       activity.isDone = false;
+      activity.isDoneAt = null;
       changed = true;
       continue;
     }
@@ -154,7 +160,18 @@ export function observePtyData(surfaceId: SurfaceId, data: string): void {
     if (mcpMatch) {
       activity.lastTool = `${mcpMatch[1]}:${mcpMatch[2]}`;
       activity.isDone = false;
+      activity.isDoneAt = null;
       changed = true;
+      continue;
+    }
+
+    // Tool result line (⎿) — means a tool is actively running, clear done state
+    if (PATTERNS.toolResult.test(trimmed)) {
+      if (activity.isDone) {
+        activity.isDone = false;
+        activity.isDoneAt = null;
+        changed = true;
+      }
       continue;
     }
   }
