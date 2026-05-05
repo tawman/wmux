@@ -90,42 +90,42 @@ function getThemesDir(): string {
   return path.join(__dirname, '../../resources/themes');
 }
 
-export function loadBundledThemes(): Map<string, ThemeConfig> {
+function scanThemesDir(dir: string): Map<string, ThemeConfig> {
   const result = new Map<string, ThemeConfig>();
-  const themesDir = getThemesDir();
-
   let entries: string[];
   try {
-    entries = fs.readdirSync(themesDir);
+    entries = fs.readdirSync(dir);
   } catch {
-    return result; // Directory doesn't exist or isn't readable
+    return result;
   }
 
   for (const entry of entries) {
-    const filePath = path.join(themesDir, entry);
-    let stat: fs.Stats;
+    const filePath = path.join(dir, entry);
     try {
-      stat = fs.statSync(filePath);
+      if (!fs.statSync(filePath).isFile()) continue;
     } catch {
       continue;
     }
-    if (!stat.isFile()) continue;
-
     const themeName = path.parse(entry).name;
-    let content: string;
     try {
-      content = fs.readFileSync(filePath, 'utf-8');
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const theme = parseThemeFileContent(themeName, content);
+      if (theme) result.set(themeName, theme);
     } catch {
       continue;
-    }
-
-    const theme = parseThemeFileContent(themeName, content);
-    if (theme) {
-      result.set(themeName, theme);
     }
   }
 
   return result;
+}
+
+export function loadBundledThemes(): Map<string, ThemeConfig> {
+  // Primary: resolved path (resourcesPath when packaged, ../../resources/themes in dev)
+  const primary = scanThemesDir(getThemesDir());
+  if (primary.size > 0) return primary;
+
+  // Fallback: always try the source-relative path in case resourcesPath resolution fails
+  return scanThemesDir(path.join(__dirname, '../../resources/themes'));
 }
 
 /**

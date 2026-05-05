@@ -140,8 +140,13 @@ export class PtyManager {
     let args: string[] = [];
     if (shellType === 'powershell') {
       const script = path.join(integrationDir, 'wmux-powershell-integration.ps1');
-      env.WMUX_PS1_SCRIPT = script;
-      args = ['-NoLogo', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', '. $env:WMUX_PS1_SCRIPT'];
+      if (fs.existsSync(script)) {
+        env.WMUX_PS1_SCRIPT = script;
+        args = ['-NoLogo', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', '. $env:WMUX_PS1_SCRIPT'];
+      } else {
+        console.warn(`[wmux] shell-integration not found at: ${script} — starting PowerShell without integration`);
+        args = ['-NoLogo'];
+      }
     } else if (shellType === 'cmd') {
       const script = path.join(integrationDir, 'wmux-cmd-integration.cmd');
       args = ['/K', script];
