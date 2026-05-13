@@ -192,6 +192,35 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     // Open terminal in the DOM
     terminal.open(terminalRef.current);
 
+    // Always scroll wmux's buffer on wheel — never forward to the app.
+    // Without this, when a TUI (Claude Code, vim, tmux…) enables mouse
+    // tracking via DECSET 1000/1002/1003/1006, xterm.js sends wheel
+    // events to the app instead of scrolling the buffer (see
+    // @xterm/xterm Terminal.ts wheel handler: `if (requestedEvents.wheel) return`).
+    // That has two visible effects: scrollback is dead, AND the app paints
+    // a cell highlight that tracks the mouse cursor. We intercept on the
+    // capture phase before xterm's listener runs.
+    const wheelHost = terminalRef.current;
+    const onWheelCapture = (ev: WheelEvent) => {
+      if (ev.deltaY === 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      let amount: number;
+      if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
+        amount = ev.deltaY;
+      } else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) {
+        amount = ev.deltaY * (terminal.rows || 24);
+      } else {
+        amount = ev.deltaY / 17;
+      }
+      const lines = Math.sign(amount) * Math.max(1, Math.round(Math.abs(amount)));
+      if (lines !== 0) terminal.scrollLines(lines);
+    };
+    wheelHost.addEventListener('wheel', onWheelCapture, { capture: true, passive: false });
+    cleanupFnsRef.current.push(() => {
+      wheelHost.removeEventListener('wheel', onWheelCapture, { capture: true } as any);
+    });
+
     // Korean/CJK IME reliability fix.
     // xterm.js 5.5's CompositionHelper._finalizeComposition defers reading the
     // textarea via setTimeout(0), which races against fast Hangul composition
