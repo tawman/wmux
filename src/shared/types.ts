@@ -277,6 +277,8 @@ export const IPC_CHANNELS = {
   SESSION_LOAD_NAMED: 'session:load-named',
   SESSION_LIST_NAMED: 'session:list-named',
   SESSION_DELETE_NAMED: 'session:delete-named',
+  // Auto-saved session (the rolling 30s snapshot the main process writes)
+  SESSION_LOAD_AUTO: 'session:load-auto',
   // Diff viewer
   DIFF_GET_FILES: 'diff:get-files',
   DIFF_GET_DIFF: 'diff:get-diff',

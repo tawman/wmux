@@ -14,7 +14,7 @@ import { WindowManager } from './window-manager';
 import { CDPBridge } from './cdp-bridge';
 import { CDPProxy } from './cdp-proxy';
 import { AgentManager } from './agent-manager';
-import { saveNamedSession, loadNamedSession, listNamedSessions, deleteNamedSession } from './session-persistence';
+import { saveNamedSession, loadNamedSession, listNamedSessions, deleteNamedSession, loadSession } from './session-persistence';
 import { getChangedFiles, getFileDiff } from './diff-provider';
 
 const ptyManager = new PtyManager();
@@ -196,6 +196,23 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   });
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST_NAMED, () => {
     return listNamedSessions();
+  });
+  // Return the most recent auto-saved session in the flattened shape the
+  // renderer's restore code already understands. Used on app launch so the
+  // workspaces / splits / tabs persisted by the 30s rolling save are actually
+  // rehydrated (instead of the renderer falling back to a fresh "Session 1").
+  ipcMain.handle(IPC_CHANNELS.SESSION_LOAD_AUTO, () => {
+    const data = loadSession();
+    const win = data?.windows?.[0];
+    if (!win) return null;
+    const activeIndex = win.activeWorkspaceId
+      ? win.workspaces.findIndex(w => w.id === win.activeWorkspaceId)
+      : 0;
+    return {
+      workspaces: win.workspaces,
+      sidebarWidth: win.sidebarWidth,
+      activeIndex: activeIndex >= 0 ? activeIndex : 0,
+    };
   });
   ipcMain.handle(IPC_CHANNELS.SESSION_DELETE_NAMED, (_event, name: string) => {
     return deleteNamedSession(name);

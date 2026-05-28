@@ -1,18 +1,24 @@
 import { StateCreator } from 'zustand';
 
-// ─── Persistence helpers (issue #12: defaultShell was lost on restart) ──────
-// Zustand has no persistence middleware here, so workspacePrefs were re-set to
-// defaults on every launch — making the "Default shell" setting feel broken.
-// We persist just this slice to localStorage; failures are swallowed so a
+// ─── Persistence helpers (issue #12 + issue #15) ────────────────────────────
+// Zustand has no persistence middleware here, so any pref that lives only in
+// state resets on every launch — which made "Default shell" (issue #12) and
+// theme/font/shortcut customizations (issue #15) feel broken. Every user
+// customization gets mirrored to localStorage; failures are swallowed so a
 // locked/sandboxed storage layer can't break the renderer boot.
 
-const WORKSPACE_PREFS_STORAGE_KEY = 'wmux-workspace-prefs';
+const STORAGE_KEYS = {
+  workspacePrefs:    'wmux-workspace-prefs',
+  terminalPrefs:     'wmux-terminal-prefs',
+  sidebarPrefs:      'wmux-sidebar-prefs',
+  notificationPrefs: 'wmux-notification-prefs',
+  browserPrefs:      'wmux-browser-prefs',
+  shortcuts:         'wmux-shortcuts',
+} as const;
 
-function loadPersistedWorkspacePrefs(): Partial<WorkspacePrefs> {
+function loadPersisted<T>(key: string): Partial<T> {
   try {
-    const raw = typeof localStorage !== 'undefined'
-      ? localStorage.getItem(WORKSPACE_PREFS_STORAGE_KEY)
-      : null;
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -21,10 +27,10 @@ function loadPersistedWorkspacePrefs(): Partial<WorkspacePrefs> {
   }
 }
 
-function persistWorkspacePrefs(prefs: WorkspacePrefs): void {
+function persist<T>(key: string, value: T): void {
   try {
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(WORKSPACE_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+      localStorage.setItem(key, JSON.stringify(value));
     }
   } catch {
     // localStorage unavailable (private mode, quota exceeded) — ignore
@@ -256,21 +262,24 @@ export interface SettingsSlice {
 // ─── Slice creator ────────────────────────────────────────────────────────────
 
 export const createSettingsSlice: StateCreator<SettingsSlice> = (set) => ({
-  shortcuts: { ...DEFAULT_SHORTCUTS },
-  sidebarVisible: true,
-  sidebarPrefs: { ...DEFAULT_SIDEBAR_PREFS },
-  workspacePrefs: { ...DEFAULT_WORKSPACE_PREFS, ...loadPersistedWorkspacePrefs() },
-  terminalPrefs: { ...DEFAULT_TERMINAL_PREFS },
-  notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
-  browserPrefs: { ...DEFAULT_BROWSER_PREFS },
+  shortcuts:         { ...DEFAULT_SHORTCUTS,         ...loadPersisted<Record<ShortcutAction, ShortcutBinding>>(STORAGE_KEYS.shortcuts) },
+  sidebarVisible:    true,
+  sidebarPrefs:      { ...DEFAULT_SIDEBAR_PREFS,      ...loadPersisted<SidebarPrefs>(STORAGE_KEYS.sidebarPrefs) },
+  workspacePrefs:    { ...DEFAULT_WORKSPACE_PREFS,    ...loadPersisted<WorkspacePrefs>(STORAGE_KEYS.workspacePrefs) },
+  terminalPrefs:     { ...DEFAULT_TERMINAL_PREFS,     ...loadPersisted<TerminalPrefs>(STORAGE_KEYS.terminalPrefs) },
+  notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS, ...loadPersisted<NotificationPrefs>(STORAGE_KEYS.notificationPrefs) },
+  browserPrefs:      { ...DEFAULT_BROWSER_PREFS,      ...loadPersisted<BrowserPrefs>(STORAGE_KEYS.browserPrefs) },
 
   setShortcut(action: ShortcutAction, binding: ShortcutBinding): void {
-    set((state) => ({
-      shortcuts: { ...state.shortcuts, [action]: binding },
-    }));
+    set((state) => {
+      const merged = { ...state.shortcuts, [action]: binding };
+      persist(STORAGE_KEYS.shortcuts, merged);
+      return { shortcuts: merged };
+    });
   },
 
   resetShortcuts(): void {
+    persist(STORAGE_KEYS.shortcuts, DEFAULT_SHORTCUTS);
     set({ shortcuts: { ...DEFAULT_SHORTCUTS } });
   },
 
@@ -279,26 +288,42 @@ export const createSettingsSlice: StateCreator<SettingsSlice> = (set) => ({
   },
 
   setSidebarPrefs(prefs: Partial<SidebarPrefs>): void {
-    set((state) => ({ sidebarPrefs: { ...state.sidebarPrefs, ...prefs } }));
+    set((state) => {
+      const merged = { ...state.sidebarPrefs, ...prefs };
+      persist(STORAGE_KEYS.sidebarPrefs, merged);
+      return { sidebarPrefs: merged };
+    });
   },
 
   setWorkspacePrefs(prefs: Partial<WorkspacePrefs>): void {
     set((state) => {
       const merged = { ...state.workspacePrefs, ...prefs };
-      persistWorkspacePrefs(merged);
+      persist(STORAGE_KEYS.workspacePrefs, merged);
       return { workspacePrefs: merged };
     });
   },
 
   setTerminalPrefs(prefs: Partial<TerminalPrefs>): void {
-    set((state) => ({ terminalPrefs: { ...state.terminalPrefs, ...prefs } }));
+    set((state) => {
+      const merged = { ...state.terminalPrefs, ...prefs };
+      persist(STORAGE_KEYS.terminalPrefs, merged);
+      return { terminalPrefs: merged };
+    });
   },
 
   setNotificationPrefs(prefs: Partial<NotificationPrefs>): void {
-    set((state) => ({ notificationPrefs: { ...state.notificationPrefs, ...prefs } }));
+    set((state) => {
+      const merged = { ...state.notificationPrefs, ...prefs };
+      persist(STORAGE_KEYS.notificationPrefs, merged);
+      return { notificationPrefs: merged };
+    });
   },
 
   setBrowserPrefs(prefs: Partial<BrowserPrefs>): void {
-    set((state) => ({ browserPrefs: { ...state.browserPrefs, ...prefs } }));
+    set((state) => {
+      const merged = { ...state.browserPrefs, ...prefs };
+      persist(STORAGE_KEYS.browserPrefs, merged);
+      return { browserPrefs: merged };
+    });
   },
 });

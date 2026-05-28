@@ -16,7 +16,7 @@ export interface WorkspaceSlice {
   reorderWorkspaces(ids: WorkspaceId[]): void;
   updateWorkspaceMetadata(id: WorkspaceId, partial: Partial<WorkspaceInfo>): void;
   updateSplitTree(id: WorkspaceId, tree: SplitNode): void;
-  replaceAllWorkspaces(workspaces: Array<Partial<WorkspaceInfo>>): void;
+  replaceAllWorkspaces(workspaces: Array<Partial<WorkspaceInfo>>, activeIndex?: number): void;
 }
 
 // ─── Slice creator ───────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice> = (set, get) => 
     }));
   },
 
-  replaceAllWorkspaces(workspaceConfigs: Array<Partial<WorkspaceInfo>>): void {
+  replaceAllWorkspaces(workspaceConfigs: Array<Partial<WorkspaceInfo>>, activeIndex?: number): void {
     const newWorkspaces: WorkspaceInfo[] = workspaceConfigs.map((config, i) => ({
       id: `ws-${uuid()}` as WorkspaceId,
       title: config.title ?? `Workspace ${i + 1}`,
@@ -126,9 +126,16 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice> = (set, get) => 
       browserUrl: config.browserUrl,
     }));
 
+    // IDs are regenerated above, so a saved activeWorkspaceId is meaningless —
+    // callers pass the index of the previously-active workspace instead.
+    const clampedIndex =
+      typeof activeIndex === 'number' && newWorkspaces.length > 0
+        ? Math.max(0, Math.min(activeIndex, newWorkspaces.length - 1))
+        : 0;
+
     set({
       workspaces: newWorkspaces,
-      activeWorkspaceId: newWorkspaces.length > 0 ? newWorkspaces[0].id : null,
+      activeWorkspaceId: newWorkspaces.length > 0 ? newWorkspaces[clampedIndex].id : null,
     });
   },
 });

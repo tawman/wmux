@@ -122,6 +122,7 @@ contextBridge.exposeInMainWorld('wmux', {
     load: (name: string) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LOAD_NAMED, name),
     list: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST_NAMED),
     delete: (name: string) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE_NAMED, name),
+    loadAuto: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LOAD_AUTO),
     onAutoSaveRequest: (callback: () => void) => {
       const handler = () => callback();
       ipcRenderer.on('session:request', handler);

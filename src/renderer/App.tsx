@@ -146,9 +146,22 @@ export default function App() {
     setTutorialOpen(false);
   }, []);
 
-  // Initialize workspaces: try loading saved session first, then create default
+  // Initialize workspaces: prefer the rolling auto-saved session (the file
+  // main writes every 30s + on quit), fall back to the most recent named
+  // session, then to a fresh default. The auto-save is the user's actual last
+  // state — earlier versions only restored named sessions, so on every
+  // restart users with no manually-saved snapshot lost their workspaces.
   useEffect(() => {
     (async () => {
+      try {
+        const autoSaved = await window.wmux?.session?.loadAuto?.();
+        if (autoSaved && Array.isArray(autoSaved.workspaces) && autoSaved.workspaces.length > 0) {
+          const { replaceAllWorkspaces } = useStore.getState();
+          replaceAllWorkspaces(autoSaved.workspaces, autoSaved.activeIndex);
+          if (autoSaved.sidebarWidth) setSidebarWidth(autoSaved.sidebarWidth);
+          return;
+        }
+      } catch {}
       try {
         const sessions = await window.wmux?.session?.list();
         if (sessions && sessions.length > 0) {
