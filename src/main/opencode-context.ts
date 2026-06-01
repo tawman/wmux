@@ -59,3 +59,45 @@ export function ensureOpencodeContext(): void {
     console.warn('[wmux] Failed to update OpenCode context:', err);
   }
 }
+
+const VERSION_RE = /wmux-plugin-version:\s*(\S+)/;
+
+/** Pure: compare embedded version markers to decide whether to re-install. */
+export function pluginNeedsUpdate(src: string, target: string | null): boolean {
+  if (target === null) return true;
+  const s = src.match(VERSION_RE)?.[1];
+  const t = target.match(VERSION_RE)?.[1];
+  return s !== t;
+}
+
+function getPluginSrcPath(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { app } = require('electron') as typeof import('electron');
+    if (app.isPackaged) {
+      return path.join(process.resourcesPath, 'opencode-plugin', 'wmux.js');
+    }
+  } catch {}
+  return path.join(__dirname, '../../resources/opencode-plugin/wmux.js');
+}
+
+/** Installs/updates the wmux OpenCode plugin into ~/.config/opencode/plugin/. */
+export function ensureOpencodePlugin(): void {
+  try {
+    const srcPath = getPluginSrcPath();
+    if (!fs.existsSync(srcPath)) {
+      console.warn('[wmux] opencode plugin source not found at', srcPath);
+      return;
+    }
+    const src = fs.readFileSync(srcPath, 'utf-8');
+    const destDir = path.join(os.homedir(), '.config', 'opencode', 'plugin');
+    const dest = path.join(destDir, 'wmux.js');
+    const target = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf-8') : null;
+    if (!pluginNeedsUpdate(src, target)) return;
+    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+    fs.writeFileSync(dest, src, 'utf-8');
+    console.log('[wmux] Installed wmux OpenCode plugin to', dest);
+  } catch (err) {
+    console.warn('[wmux] Failed to install OpenCode plugin:', err);
+  }
+}
