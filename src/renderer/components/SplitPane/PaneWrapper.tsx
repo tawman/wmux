@@ -152,6 +152,15 @@ export default function PaneWrapper({ leaf, workspaceId, isFocused }: PaneWrappe
 
   const isWorkspaceActive = workspaceId === activeWorkspaceId;
 
+  // Safety net: reset stale drag state when this workspace becomes active.
+  // If a drop on an edge/center zone detaches the source element before dragend
+  // fires, other panes stay stuck with dragActive=true across workspace switches.
+  useEffect(() => {
+    if (isWorkspaceActive) {
+      setDragActive(false);
+    }
+  }, [isWorkspaceActive]);
+
   const renderAllSurfaces = () =>
     surfaces.map((surface, index) => {
       const isActive = index === activeSurfaceIndex;
@@ -257,7 +266,6 @@ export default function PaneWrapper({ leaf, workspaceId, isFocused }: PaneWrappe
 
   const handleEdgeDrop = (e: React.DragEvent, direction: 'left' | 'right' | 'up' | 'down') => {
     e.preventDefault();
-    e.stopPropagation();
     setDragActive(false);
     document.body.classList.remove('wmux-dragging');
     const data = e.dataTransfer.getData('application/wmux-surface');
@@ -270,7 +278,6 @@ export default function PaneWrapper({ leaf, workspaceId, isFocused }: PaneWrappe
 
   const handleCenterDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    e.stopPropagation();
     setDragActive(false);
     document.body.classList.remove('wmux-dragging');
     const data = e.dataTransfer.getData('application/wmux-surface');
