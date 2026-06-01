@@ -13,6 +13,7 @@ import { WindowManager } from './window-manager';
 import { initAutoUpdater } from './updater';
 import { initUpdateChecker, getLatestUpdate } from './update-checker';
 import { ensureClaudeContext, ensureClaudeHooks, ensureChromeDevtoolsConfig, ensureOrchestratorPlugin } from './claude-context';
+import { ensureOpencodeContext, ensureOpencodePlugin } from './opencode-context';
 import { applyExternalActivity } from './claude-observer';
 import { startOrchestrationWatcher } from './orchestration-watcher';
 import fs from 'fs';
@@ -171,6 +172,8 @@ app.whenReady().then(() => {
   ensureClaudeHooks();
   ensureChromeDevtoolsConfig();
   ensureOrchestratorPlugin();
+  ensureOpencodeContext();
+  ensureOpencodePlugin();
 
   // IPC: renderer pushes session state (auto-save response or explicit save)
   ipcMain.on('session:save', (event, data: SessionData) => {
