@@ -72,7 +72,11 @@ export class CDPBridge {
     }
   }
 
-  detach(): void {
+  // Detach the debugger. When `wcId` is provided, only detach if this bridge is
+  // currently attached to that exact webContents — so a closing BrowserPane never
+  // tears down a connection that another, still-open pane owns (issue #27).
+  detach(wcId?: number): void {
+    if (wcId !== undefined && this.webContentsId !== wcId) return;
     if (this.webContentsId !== null) {
       try {
         const wc = webContents.fromId(this.webContentsId);
@@ -82,6 +86,10 @@ export class CDPBridge {
     this.attached = false;
     this.webContentsId = null;
     this.currentRefMap.clear();
+  }
+
+  get attachedWebContentsId(): number | null {
+    return this.webContentsId;
   }
 
   get isAttached(): boolean {

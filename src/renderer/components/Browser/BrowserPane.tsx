@@ -68,21 +68,26 @@ export default function BrowserPane({ initialUrl = 'https://github.com/amirlehma
     };
   }, []);
 
+  const wcIdRef = useRef<number | null>(null);
+  // Claim this pane's webview as the active CDP target (issue #27).
+  const claimCdp = useCallback(() => {
+    const wcId = webviewRef.current?.getWebContentsId?.();
+    if (wcId && window.wmux?.cdp?.attach) {
+      wcIdRef.current = wcId;
+      window.wmux.cdp.attach(wcId);
+    }
+  }, []);
   useEffect(() => {
     const wv = webviewRef.current;
     if (!wv) return;
-    const onAttach = () => {
-      const wcId = wv.getWebContentsId?.();
-      if (wcId && window.wmux?.cdp?.attach) {
-        window.wmux.cdp.attach(wcId);
-      }
-    };
-    wv.addEventListener('dom-ready', onAttach);
+    wv.addEventListener('dom-ready', claimCdp);
     return () => {
-      wv.removeEventListener('dom-ready', onAttach);
-      window.wmux?.cdp?.detach?.();
+      wv.removeEventListener('dom-ready', claimCdp);
+      // Only detach if this pane still owns the connection — closing a split-tree
+      // browser pane must not kill another open pane's CDP (issue #27).
+      if (wcIdRef.current !== null) window.wmux?.cdp?.detach?.(wcIdRef.current);
     };
-  }, []);
+  }, [claimCdp]);
 
   // Listen for programmatic navigation (e.g. auto-navigate on dev server detection)
   useEffect(() => {
@@ -96,7 +101,7 @@ export default function BrowserPane({ initialUrl = 'https://github.com/amirlehma
   }, [navigate, surfaceId]);
 
   return (
-    <div className="browser-pane">
+    <div className="browser-pane" onMouseDownCapture={claimCdp}>
       <AddressBar
         url={currentUrl}
         isLoading={isLoading}

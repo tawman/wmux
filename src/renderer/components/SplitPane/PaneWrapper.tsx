@@ -204,6 +204,12 @@ export default function PaneWrapper({ leaf, workspaceId, isFocused }: PaneWrappe
     }
   };
 
+  const handleNewSurfaceTyped = (type: 'terminal' | 'browser' | 'markdown') => {
+    if (activeWorkspaceId) {
+      addSurface(activeWorkspaceId, paneId, type);
+    }
+  };
+
   const handleSelectSurface = (index: number) => {
     if (activeWorkspaceId) {
       selectSurface(activeWorkspaceId, paneId, index);
@@ -312,6 +318,7 @@ export default function PaneWrapper({ leaf, workspaceId, isFocused }: PaneWrappe
         onSelect={handleSelectSurface}
         onClose={handleCloseSurface}
         onNew={handleNewSurface}
+        onNewTyped={handleNewSurfaceTyped}
         onClosePane={handleClosePane}
         onSplitRight={handleSplitRight}
         onSplitDown={handleSplitDown}

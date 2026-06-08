@@ -10,6 +10,7 @@ interface SurfaceTabBarProps {
   onSelect: (index: number) => void;
   onClose: (surfaceId: SurfaceId) => void;
   onNew: () => void;
+  onNewTyped?: (type: 'terminal' | 'browser' | 'markdown') => void;
   onClosePane?: () => void;
   onSplitRight?: () => void;
   onSplitDown?: () => void;
@@ -63,6 +64,7 @@ export default function SurfaceTabBar({
   onSelect,
   onClose,
   onNew,
+  onNewTyped,
   onClosePane,
   onSplitRight,
   onSplitDown,
@@ -75,7 +77,9 @@ export default function SurfaceTabBar({
   const [insertIndex, setInsertIndex] = useState<number | null>(null);
   const [renamingId, setRenamingId] = useState<SurfaceId | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const newMenuRef = useRef<HTMLDivElement>(null);
   const agentMeta = useStore((state) => state.agentMeta);
   const activeWorkspaceId = useStore((state) => state.activeWorkspaceId);
   const renameSurface = useStore((state) => state.renameSurface);
@@ -119,6 +123,27 @@ export default function SurfaceTabBar({
       renameInputRef.current?.select();
     }
   }, [renamingId]);
+
+  // Close the "new surface" menu on outside click or Escape
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) setNewMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNewMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [newMenuOpen]);
+
+  const pickNew = useCallback((type: 'terminal' | 'browser' | 'markdown') => {
+    setNewMenuOpen(false);
+    if (onNewTyped) onNewTyped(type);
+    else onNew();
+  }, [onNewTyped, onNew]);
 
   // Always show tab bar (even for 1 surface — like browser tabs)
   return (
@@ -240,10 +265,37 @@ export default function SurfaceTabBar({
         className="surface-tab-bar__new-btn"
         onClick={onNew}
         tabIndex={-1}
-        title="New tab (Ctrl+T)"
+        title="New terminal tab (Ctrl+T)"
       >
         +
       </button>
+      {onNewTyped && (
+        <div className="surface-tab-bar__new-menu-wrap" ref={newMenuRef}>
+          <button
+            className="surface-tab-bar__new-caret"
+            onClick={() => setNewMenuOpen((v) => !v)}
+            tabIndex={-1}
+            aria-haspopup="menu"
+            aria-expanded={newMenuOpen}
+            title="New tab type…"
+          >
+            ▾
+          </button>
+          {newMenuOpen && (
+            <div className="surface-tab-bar__new-menu" role="menu">
+              <button role="menuitem" onClick={() => pickNew('terminal')}>
+                <span className="surface-tab-bar__new-menu-icon">{surfaceIcon('terminal', false)}</span> Terminal
+              </button>
+              <button role="menuitem" onClick={() => pickNew('browser')}>
+                <span className="surface-tab-bar__new-menu-icon">{surfaceIcon('browser', false)}</span> Browser
+              </button>
+              <button role="menuitem" onClick={() => pickNew('markdown')}>
+                <span className="surface-tab-bar__new-menu-icon">{surfaceIcon('markdown', false)}</span> Markdown
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {onSplitRight && (
         <button
           className="surface-tab-bar__split-btn"

@@ -165,8 +165,10 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
     cdpBridge.attach(webContentsId);
     cdpProxyInstance?.setWebContentsId(webContentsId);
   });
-  ipcMain.on(IPC_CHANNELS.CDP_DETACH, () => {
-    cdpBridge.detach();
+  ipcMain.on(IPC_CHANNELS.CDP_DETACH, (_event, webContentsId?: number) => {
+    // Only the pane that owns the current attachment may clear it (issue #27).
+    if (webContentsId !== undefined && cdpBridge.attachedWebContentsId !== webContentsId) return;
+    cdpBridge.detach(webContentsId);
     cdpProxyInstance?.setWebContentsId(null);
   });
 

@@ -1,10 +1,14 @@
 import { app, BrowserWindow, net } from 'electron';
 import { IPC_CHANNELS } from '../shared/types';
 
-// Polls GitHub /releases/latest and broadcasts when a newer version is published.
-// We can't use electron-updater for the actual install because the release flow
-// ships a portable zip (no latest.yml, no NSIS), so this is a notify-only path:
-// renderer shows a badge, click opens the GitHub release page in the OS browser.
+// wmux has two distinct update paths:
+//   1. updater.ts (electron-updater) — actually downloads/installs, now gated by a
+//      quarantine window + an explicit user-confirmed install (see issue #29).
+//   2. this module — a notify-only poll of GitHub /releases/latest that broadcasts
+//      a badge; clicking it opens the GitHub release page in the OS browser.
+// The release flow does emit latest.yml, so path 1 is live; this path remains as a
+// lightweight, zero-trust-install notification and a source of release metadata
+// (published_at) that updater.ts reuses to compute release age.
 
 const REPO_OWNER = 'amirlehmam';
 const REPO_NAME = 'wmux';
@@ -36,7 +40,7 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-function fetchLatestRelease(): Promise<{ tag_name: string; html_url: string; body?: string; published_at?: string; draft?: boolean; prerelease?: boolean } | null> {
+export function fetchLatestRelease(): Promise<{ tag_name: string; html_url: string; body?: string; published_at?: string; draft?: boolean; prerelease?: boolean } | null> {
   return new Promise((resolve) => {
     const req = net.request({
       method: 'GET',

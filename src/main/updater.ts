@@ -1,28 +1,106 @@
 import { autoUpdater } from 'electron-updater';
-import { BrowserWindow } from 'electron';
+import { BrowserWindow, dialog } from 'electron';
+import { fetchLatestRelease } from './update-checker';
+
+// ── Auto-update hardening (issue #29) ────────────────────────────────────────
+// The old flow auto-downloaded AND silently auto-installed on quit, with no
+// authenticity check. Anyone able to publish a release to the repo got near-
+// instant silent RCE on every install. We mitigate the two highest-leverage
+// properties here, in code, without new signing infrastructure:
+//
+//   1. Quarantine window — never install a release until it has been public for
+//      N days, so a malicious release can be detected and yanked before clients
+//      adopt it. Age is read from GitHub's server-side `published_at`, not the
+//      attacker-writable latest.yml `releaseDate`.
+//   2. No silent install — autoDownload/autoInstallOnAppQuit are off; the user
+//      must explicitly confirm the install via a dialog.
+//
+// (Signature verification + Authenticode + build provenance are tracked as
+// follow-ups in the issue; they need offline keys / CI changes, not just code.)
+
+const DEFAULT_MIN_RELEASE_AGE_DAYS = 3;
+const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function minReleaseAgeMs(): number {
+  const raw = process.env.WMUX_MIN_RELEASE_AGE_DAYS;
+  const days = raw !== undefined && raw !== '' ? Number(raw) : DEFAULT_MIN_RELEASE_AGE_DAYS;
+  if (!Number.isFinite(days) || days < 0) return DEFAULT_MIN_RELEASE_AGE_DAYS * DAY_MS;
+  return days * DAY_MS;
+}
+
+// Age of the release that electron-updater found, in ms, from GitHub's
+// server-side published_at. Returns null when it can't be confirmed — callers
+// treat null conservatively (hold the update this cycle, re-check later).
+async function releaseAgeMs(version: string): Promise<number | null> {
+  const release = await fetchLatestRelease();
+  if (!release?.published_at) return null;
+  const tag = (release.tag_name || '').replace(/^v/, '');
+  if (tag && version && tag !== version.replace(/^v/, '')) return null;
+  const published = Date.parse(release.published_at);
+  if (Number.isNaN(published)) return null;
+  return Date.now() - published;
+}
+
+let installPrompted = false;
 
 export function initAutoUpdater(): void {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Gate both download and install — nothing happens without passing the
+  // quarantine window and an explicit user click.
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
 
-  autoUpdater.on('update-available', (info) => {
-    console.log('Update available:', info.version);
+  autoUpdater.on('update-available', async (info) => {
+    try {
+      const ageMs = await releaseAgeMs(info.version);
+      const minMs = minReleaseAgeMs();
+      if (ageMs === null) {
+        console.log(`[updater] Cannot confirm age of ${info.version}; holding until next check.`);
+        return;
+      }
+      if (ageMs < minMs) {
+        const daysLeft = ((minMs - ageMs) / DAY_MS).toFixed(1);
+        console.log(`[updater] ${info.version} in quarantine window (${daysLeft}d remaining); not downloading yet.`);
+        return;
+      }
+      console.log(`[updater] ${info.version} cleared quarantine; downloading.`);
+      await autoUpdater.downloadUpdate();
+    } catch (err) {
+      console.error('[updater] update-available handling failed:', err);
+    }
   });
 
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('Update downloaded:', info.version);
-    // Notify renderer
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('updater:ready', info.version);
-      }
+  autoUpdater.on('update-downloaded', async (info) => {
+    // Surface to the renderer (badge), then require an explicit user click to
+    // install — never restart-and-replace silently.
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) win.webContents.send('updater:ready', info.version);
     });
+
+    if (installPrompted) return;
+    installPrompted = true;
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['Install and restart', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'wmux update ready',
+      message: `wmux ${info.version} has been downloaded.`,
+      detail: 'Review the release notes on GitHub before installing. Install now?',
+    });
+    if (response === 0) {
+      autoUpdater.quitAndInstall();
+    } else {
+      installPrompted = false; // allow re-prompting on a later cycle
+    }
   });
 
   autoUpdater.on('error', (err) => {
-    console.error('Auto-updater error:', err);
+    console.error('[updater] Auto-updater error:', err);
   });
 
-  // Check for updates (silently fails if no update server configured)
-  autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  // Initial check + periodic re-check so a quarantined release installs once it
+  // ages past the window, without needing an app restart.
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, RECHECK_INTERVAL_MS);
 }
