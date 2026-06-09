@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react';
 import { Terminal, ITheme } from '@xterm/xterm';
-import { CanvasAddon } from '@xterm/addon-canvas';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
@@ -10,7 +9,7 @@ import { useStore } from '../store';
 import { SplitNode, ThemeConfig } from '../../shared/types';
 import { UserColorScheme } from '../store/settings-slice';
 import { openInWmuxBrowser } from '../utils/open-in-browser';
-import { forceSyncCursorRendering } from '../utils/force-sync-cursor';
+import { attachVisibleRenderer, RendererHandle } from '../utils/terminal-renderer';
 import '@xterm/xterm/css/xterm.css';
 
 declare global {
@@ -130,6 +129,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const ptyIdRef = useRef<string | null>(null);
   const cleanupFnsRef = useRef<Array<() => void>>([]);
+  const rendererRef = useRef<RendererHandle | null>(null);
 
   // Subscribe to relevant settings so changes apply live.
   const prefs = useStore((s) => s.terminalPrefs);
@@ -316,22 +316,12 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       return true;
     });
 
-    // Use Canvas2D renderer instead of WebGL. WebGL has a hard per-process
-    // limit (~16 contexts in Chromium); with N workspaces x M panes that ceiling
-    // gets hit fast and Chromium force-loses the oldest contexts, which in
-    // practice freezes the whole renderer (both old and newly-created sessions
-    // stop reacting). Canvas2D has no such limit and keeps all terminals live.
-    const canvasAddon = new CanvasAddon();
-    try {
-      terminal.loadAddon(canvasAddon);
-      // Canvas renders the cursor in a blink-timer-driven rAF layer that lags
-      // behind typing under wmux's busy Electron renderer (issue #23). Force it
-      // to repaint synchronously like the WebGL renderer does.
-      forceSyncCursorRendering(terminal);
-    } catch {
-      // Canvas unavailable — xterm falls back to DOM renderer automatically
-      canvasAddon.dispose();
-    }
+    // GPU renderer (WebGL preferred) is attached by the visibility effect
+    // below, only while this terminal is actually on screen. Hidden keep-alive
+    // tabs stay on xterm's default DOM renderer so the per-process WebGL
+    // context cap (~16 in Chromium) is never approached. The deprecated Canvas
+    // addon is only a fallback — it mispaints wide CJK chars and stale rows
+    // under load (issues #23, #30).
 
     // Initial fit
     requestAnimationFrame(() => {
@@ -478,6 +468,10 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       // kills PTYs. This allows tree restructuring (closing an adjacent pane)
       // to re-mount this component without losing the terminal session.
 
+      // Release the GPU renderer (and its WebGL budget slot) before disposing
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+
       // Dispose terminal
       terminal.dispose();
       xtermRef.current = null;
@@ -516,6 +510,12 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   useEffect(() => {
     if (visible && fitAddonRef.current && xtermRef.current) {
       const term = xtermRef.current;
+      // Attach the GPU renderer on show (WebGL → Canvas → DOM). A Canvas/DOM
+      // fallback handle is kept across hides to avoid attach churn; only WebGL
+      // is released on hide to return its context to the budget.
+      if (!rendererRef.current) {
+        rendererRef.current = attachVisibleRenderer(term);
+      }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           fit();
@@ -529,6 +529,11 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
           }
         });
       });
+    } else if (!visible && rendererRef.current?.kind === 'webgl') {
+      // Hidden: free the WebGL context. The default DOM renderer takes over
+      // for background writes; we re-attach WebGL when shown again.
+      rendererRef.current.dispose();
+      rendererRef.current = null;
     }
   }, [visible, focused]);
 
