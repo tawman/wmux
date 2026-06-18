@@ -153,6 +153,8 @@ export class PtyManager {
       args = ['/K', script];
     } else if (shellType === 'wsl') {
       env.WMUX_INTEGRATION = '1';
+      // Start in Linux home instead of the Windows CWD (which WSL would mount as /mnt/c/...)
+      args = ['--cd', '~'];
     }
 
     const spawnOptions: pty.IWindowsPtyForkOptions = {
