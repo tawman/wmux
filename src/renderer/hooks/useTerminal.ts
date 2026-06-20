@@ -236,15 +236,71 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     const wheelHost = terminalRef.current;
     const onWheelCapture = (ev: WheelEvent) => {
       if (ev.deltaY === 0) return;
-      // Only hijack the wheel for scrollback on the NORMAL buffer. Full-screen
-      // TUIs (Claude Code, vim, less, htop…) switch to the ALTERNATE buffer
-      // (DECSET 1049), which has no scrollback — terminal.scrollLines() there is
-      // a no-op. If we still preventDefault/stopPropagation we also suppress
-      // xterm's native behavior of forwarding the wheel to the app (mouse-wheel
-      // reports when mouse tracking is on, otherwise arrow-key sequences), which
-      // is the ONLY way those apps scroll their own content. So on the alt
-      // buffer we fall through and let xterm handle it.
-      if (terminal.buffer.active.type !== 'normal') return;
+
+      if (terminal.buffer.active.type !== 'normal') {
+        // Alternate screen (Claude Code, vim, less, htop…): there is no scrollback
+        // buffer, so terminal.scrollLines() is a no-op. We must forward wheel events
+        // to the PTY application ourselves.
+        //
+        // xterm's own forwarding (_handleWheel / _handlePassiveWheel) is unreliable
+        // here because: (a) the wheel listener is only registered when the app has
+        // explicitly requested wheel mouse events via DECSET; (b) _consumeWheelEvent
+        // silently returns 0 when render-service cell dimensions are temporarily
+        // unavailable (e.g. after the WebGL context swap introduced in v0.8.4),
+        // causing _sendEvent to drop the event with no feedback. Taking ownership
+        // here avoids both failure modes. (#41 regression from v0.8.4+)
+        ev.preventDefault();
+        ev.stopPropagation();
+        const id = ptyIdRef.current;
+        if (!id) return;
+
+        // Compute scroll count (same heuristic as normal-buffer path).
+        let amount: number;
+        if (ev.deltaMode === 1 /* DOM_DELTA_LINE */) {
+          amount = ev.deltaY;
+        } else if (ev.deltaMode === 2 /* DOM_DELTA_PAGE */) {
+          amount = ev.deltaY * (terminal.rows || 24);
+        } else {
+          amount = ev.deltaY / 17;
+        }
+        const count = Math.sign(amount) * Math.max(1, Math.round(Math.abs(amount)));
+        if (count === 0) return;
+
+        // xterm adds .enable-mouse-events to the screen element when the app has
+        // enabled any mouse protocol (DECSET 1000/1002/1003). In that case we send
+        // SGR mouse-wheel sequences (button 64=up, 65=down) which all modern TUIs
+        // understand. Without mouse tracking we fall back to up/down arrow keys,
+        // which is what xterm's _handlePassiveWheel does natively.
+        const hasMouseTracking = !!(terminalRef.current?.querySelector('.enable-mouse-events'));
+
+        if (hasMouseTracking) {
+          // Compute approximate terminal column/row from mouse pixel position so
+          // apps that care about scroll origin (e.g. split-pane TUIs) work correctly.
+          const rect = terminalRef.current?.getBoundingClientRect();
+          const cellW = rect && terminal.cols > 0 ? rect.width / terminal.cols : 0;
+          const cellH = rect && terminal.rows > 0 ? rect.height / terminal.rows : 0;
+          const col = rect && cellW > 0
+            ? Math.max(1, Math.min(terminal.cols, Math.ceil((ev.clientX - rect.left) / cellW)))
+            : Math.ceil(terminal.cols / 2);
+          const row = rect && cellH > 0
+            ? Math.max(1, Math.min(terminal.rows, Math.ceil((ev.clientY - rect.top) / cellH)))
+            : Math.ceil(terminal.rows / 2);
+          const btn = count < 0 ? 64 : 65; // 64 = wheel-up, 65 = wheel-down
+          const seq = `\x1b[<${btn};${col};${row}M`;
+          for (let i = 0; i < Math.abs(count); i++) {
+            window.wmux.pty.write(id, seq);
+          }
+        } else {
+          // No mouse tracking: send arrow keys (up/down) as a line-by-line scroll.
+          const seq = count < 0 ? '\x1b[A' : '\x1b[B';
+          for (let i = 0; i < Math.abs(count); i++) {
+            window.wmux.pty.write(id, seq);
+          }
+        }
+        return;
+      }
+
+      // Normal buffer: scroll wmux's own scrollback.
       ev.preventDefault();
       ev.stopPropagation();
       let amount: number;
