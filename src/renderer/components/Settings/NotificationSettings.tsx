@@ -49,6 +49,29 @@ export default function NotificationSettings() {
       </div>
 
       <div className="settings-divider" />
+      <h3 className="settings-section-title">AI agents</h3>
+
+      <div className="settings-row">
+        <label className="settings-label">Notify when agent needs input</label>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          checked={notificationPrefs.agentInputNotify}
+          onChange={(e) => setNotificationPrefs({ agentInputNotify: e.target.checked })}
+        />
+      </div>
+
+      <div className="settings-row">
+        <label className="settings-label">Notify when agent finishes its turn</label>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          checked={notificationPrefs.agentStopNotify}
+          onChange={(e) => setNotificationPrefs({ agentStopNotify: e.target.checked })}
+        />
+      </div>
+
+      <div className="settings-divider" />
       <h3 className="settings-section-title">Sound</h3>
 
       <div className="settings-row">

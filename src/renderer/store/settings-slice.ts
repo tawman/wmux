@@ -269,6 +269,10 @@ export interface NotificationPrefs {
   paneRing: boolean;
   paneFlashAnimation: boolean;
   sound: 'default' | 'chime' | 'ping' | 'marimba' | 'pop' | 'none';
+  /** Notify when an in-pane agent (Claude Code) needs input/permission (issue #53). */
+  agentInputNotify: boolean;
+  /** Notify when an in-pane agent (Claude Code) finishes its turn / Stop hook (issue #53). */
+  agentStopNotify: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -277,6 +281,8 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   paneRing: true,
   paneFlashAnimation: true,
   sound: 'default',
+  agentInputNotify: true,
+  agentStopNotify: true,
 };
 
 // ─── Browser settings ─────────────────────────────────────────────────────────

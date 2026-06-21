@@ -511,6 +511,22 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       return true;
     });
 
+    // Terminal bell (\x07) fallback (issue #53): many in-pane CLI agents —
+    // including Claude Code's default "I'm waiting for you" signal — ring the
+    // bell rather than emitting an OSC sequence or firing a hook. Surface it as
+    // a notification, throttled so a burst of bells (e.g. shell tab-completion
+    // with no match) doesn't flood the user.
+    let lastBellAt = 0;
+    terminal.onBell(() => {
+      const now = Date.now();
+      if (now - lastBellAt < 3000) return;
+      lastBellAt = now;
+      window.wmux.notification.fire({
+        surfaceId: ptyIdRef.current || '',
+        text: 'Terminal bell',
+      });
+    });
+
     // OSC 52: clipboard write — emitted by tmux when text is copied (set-clipboard on).
     // navigator.clipboard.writeText() requires a user-gesture context which PTY data
     // callbacks don't have, so we go through Electron's clipboard module via IPC.

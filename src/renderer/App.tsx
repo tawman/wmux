@@ -33,6 +33,143 @@ function findBottomPane(node: SplitNode): PaneId | null {
   return findBottomPane(node.children[0]);
 }
 
+// ─── Shell-integration / hook metadata handlers (issue #53) ───────────────────
+// Extracted from the metadata + hook listeners so each function stays under the
+// cognitive-complexity budget. `fireNotification` is the single place that both
+// adds the in-app bell entry and raises the OS toast (via the renderer → main
+// NOTIFICATION_FIRE chokepoint).
+
+const DEV_PORTS = [3000, 3001, 4000, 4200, 5000, 5173, 5174, 8000, 8080, 8888];
+
+type StoreAction = (...args: any[]) => void;
+type MetaDeps = {
+  updateWorkspaceMetadata: StoreAction;
+  addNotification: StoreAction;
+  runningStartTimes: React.MutableRefObject<Record<string, number>>;
+};
+
+function fireNotification(
+  surfaceId: string,
+  workspaceId: WorkspaceId | null,
+  text: string,
+  addNotification: StoreAction,
+): void {
+  if (workspaceId) {
+    addNotification({ surfaceId: (surfaceId || '') as SurfaceId, workspaceId, text });
+  }
+  window.wmux?.notification?.fire({ surfaceId: surfaceId || '', text, title: 'wmux' });
+}
+
+/** Resolve the workspace that owns a surface, or undefined. */
+function workspaceForSurface(surfaceId: string): WorkspaceInfo | undefined {
+  if (!surfaceId) return undefined;
+  return useStore.getState().workspaces.find(ws => getAllSurfaces(ws.splitTree).includes(surfaceId));
+}
+
+function handlePortsUpdate(cmd: any, updateWorkspaceMetadata: StoreAction): void {
+  try {
+    const portsByPid = JSON.parse(cmd.args?.[0] || '{}');
+    const allPorts = Object.values(portsByPid).flat() as number[];
+    const devPorts = allPorts.filter((p: number) => DEV_PORTS.includes(p));
+    if (devPorts.length > 0) {
+      const currentWs = useStore.getState().activeWorkspaceId;
+      const ws = useStore.getState().workspaces.find(w => w.id === currentWs);
+      // Only auto-navigate the browser to a NEW dev port.
+      if (currentWs && !(ws?.ports || []).includes(devPorts[0])) {
+        window.wmux?.browser?.navigate?.(`browser-${currentWs}`, `http://localhost:${devPorts[0]}`);
+      }
+    }
+    for (const ws of useStore.getState().workspaces) {
+      updateWorkspaceMetadata(ws.id, { ports: devPorts.length > 0 ? devPorts : undefined });
+    }
+  } catch {}
+}
+
+/** `wmux notify <text>` — works even outside a pane (falls back to active workspace). */
+function handleNotifyCommand(cmd: any, addNotification: StoreAction): void {
+  const text = (cmd.args || []).join(' ').trim() || 'Notification';
+  const ws = workspaceForSurface(cmd.surfaceId);
+  const wsId = ws?.id || useStore.getState().activeWorkspaceId;
+  fireNotification(cmd.surfaceId, wsId, text, addNotification);
+}
+
+/** report_shell_state: notify when a foreground command ran ≥ 5s. */
+function applyShellState(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
+  const newState = cmd.args?.[0] as 'idle' | 'running' | 'interrupted';
+  const prevState = ws.shellState;
+  deps.updateWorkspaceMetadata(ws.id, { shellState: newState });
+
+  if (newState === 'running') {
+    deps.runningStartTimes.current[ws.id] = Date.now();
+    return;
+  }
+  if (prevState !== 'running' || (newState !== 'idle' && newState !== 'interrupted')) return;
+
+  const startTime = deps.runningStartTimes.current[ws.id];
+  const elapsed = startTime ? (Date.now() - startTime) / 1000 : 0;
+  delete deps.runningStartTimes.current[ws.id];
+  if (elapsed < 5) return;
+
+  const duration = elapsed >= 60
+    ? `${Math.floor(elapsed / 60)}m${Math.round(elapsed % 60)}s`
+    : `${Math.round(elapsed)}s`;
+  const msg = newState === 'interrupted'
+    ? `Interrupted in ${ws.title} (${duration})`
+    : `Finished in ${ws.title} (${duration})`;
+  fireNotification(cmd.surfaceId, ws.id, msg, deps.addNotification);
+}
+
+/** Dispatch a surface-scoped metadata command to the owning workspace. */
+function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
+  switch (cmd.command) {
+    case 'report_pwd':
+      deps.updateWorkspaceMetadata(ws.id, { cwd: cmd.args?.[0] });
+      break;
+    case 'report_git_branch':
+      deps.updateWorkspaceMetadata(ws.id, { gitBranch: cmd.args?.[0], gitDirty: cmd.args?.[1] === 'dirty' });
+      break;
+    case 'clear_git_branch':
+      deps.updateWorkspaceMetadata(ws.id, { gitBranch: undefined, gitDirty: undefined });
+      break;
+    case 'report_pr': {
+      const [num, status, ...labelParts] = cmd.args || [];
+      deps.updateWorkspaceMetadata(ws.id, {
+        prNumber: num ? parseInt(num) : undefined,
+        prStatus: status as any,
+        prLabel: labelParts.join(' '),
+      });
+      break;
+    }
+    case 'clear_pr':
+      deps.updateWorkspaceMetadata(ws.id, { prNumber: undefined, prStatus: undefined, prLabel: undefined });
+      break;
+    case 'report_shell_state':
+      applyShellState(cmd, ws, deps);
+      break;
+  }
+}
+
+/** Claude Code Notification (needs input) / Stop (turn finished) hook events. */
+function handleAgentLifecycleEvent(event: any, addNotification: StoreAction): void {
+  const state = useStore.getState();
+  const prefs = state.notificationPrefs;
+  if (event.event === 'Notification' && prefs.agentInputNotify === false) return;
+  if (event.event === 'Stop' && prefs.agentStopNotify === false) return;
+
+  const sid = (event.surfaceId as string) || '';
+  const ws = workspaceForSurface(sid);
+  const wsId = ws?.id || state.activeWorkspaceId;
+  const wsTitle = ws?.title || state.workspaces.find(w => w.id === wsId)?.title || '';
+
+  let text: string;
+  if (event.event === 'Notification') {
+    text = event.message || 'Claude Code needs your input';
+  } else {
+    text = wsTitle ? `Claude Code finished in ${wsTitle}` : 'Claude Code finished';
+  }
+  fireNotification(sid, wsId, text, addNotification);
+}
+
 /** Build the default 3-terminal split layout for new workspaces */
 function buildDefaultSplitTree(): SplitNode {
   return {
@@ -269,109 +406,16 @@ export default function App() {
   // Listen for real-time metadata updates from shell integration (pipe server → IPC → here)
   useEffect(() => {
     if (!window.wmux?.metadata?.onUpdate) return;
+    const deps: MetaDeps = { updateWorkspaceMetadata, addNotification, runningStartTimes };
     const unsub = window.wmux.metadata.onUpdate((cmd: any) => {
       if (!cmd) return;
-
-      // ports_update has no surfaceId — handle globally
-      if (cmd.command === 'ports_update') {
-        try {
-          const portsByPid = JSON.parse(cmd.args?.[0] || '{}');
-          const allPorts = Object.values(portsByPid).flat() as number[];
-          // Only keep dev-relevant ports — ignore ephemeral system ports
-          const DEV_PORTS = [3000, 3001, 4000, 4200, 5000, 5173, 5174, 8000, 8080, 8888];
-          const devPorts = allPorts.filter((p: number) => DEV_PORTS.includes(p));
-          if (devPorts.length > 0) {
-            const port = devPorts[0];
-            // Navigate browser to first detected dev port
-            const currentWs = useStore.getState().activeWorkspaceId;
-            if (currentWs) {
-              const ws = useStore.getState().workspaces.find(w => w.id === currentWs);
-              const prevPorts = ws?.ports || [];
-              // Only auto-navigate if this is a NEW port (not already known)
-              if (!prevPorts.includes(port)) {
-                window.wmux?.browser?.navigate?.(`browser-${currentWs}`, `http://localhost:${port}`);
-              }
-            }
-          }
-          // Only store dev-relevant ports in workspace metadata (not system ports)
-          for (const ws of useStore.getState().workspaces) {
-            updateWorkspaceMetadata(ws.id, { ports: devPorts.length > 0 ? devPorts : undefined });
-          }
-        } catch {}
-        return;
-      }
+      // ports_update and notify have no (required) surfaceId — handle globally.
+      if (cmd.command === 'ports_update') { handlePortsUpdate(cmd, updateWorkspaceMetadata); return; }
+      if (cmd.command === 'notify') { handleNotifyCommand(cmd, addNotification); return; }
 
       if (!cmd.surfaceId) return;
-      // Find which workspace owns this surface
-      for (const ws of useStore.getState().workspaces) {
-        const allSurfaces = getAllSurfaces(ws.splitTree);
-        if (allSurfaces.includes(cmd.surfaceId)) {
-          switch (cmd.command) {
-            case 'report_pwd':
-              updateWorkspaceMetadata(ws.id, { cwd: cmd.args?.[0] });
-              break;
-            case 'report_git_branch': {
-              const branch = cmd.args?.[0];
-              const dirty = cmd.args?.[1] === 'dirty';
-              updateWorkspaceMetadata(ws.id, { gitBranch: branch, gitDirty: dirty });
-              break;
-            }
-            case 'clear_git_branch':
-              updateWorkspaceMetadata(ws.id, { gitBranch: undefined, gitDirty: undefined });
-              break;
-            case 'report_pr': {
-              const [num, status, ...labelParts] = cmd.args || [];
-              updateWorkspaceMetadata(ws.id, {
-                prNumber: num ? parseInt(num) : undefined,
-                prStatus: status as any,
-                prLabel: labelParts.join(' '),
-              });
-              break;
-            }
-            case 'clear_pr':
-              updateWorkspaceMetadata(ws.id, { prNumber: undefined, prStatus: undefined, prLabel: undefined });
-              break;
-            case 'report_shell_state': {
-              const newState = cmd.args?.[0] as 'idle' | 'running' | 'interrupted';
-              const prevState = ws.shellState;
-              updateWorkspaceMetadata(ws.id, { shellState: newState });
-
-              // Track when command started running
-              if (newState === 'running') {
-                runningStartTimes.current[ws.id] = Date.now();
-              }
-
-              // Only notify for commands that ran longer than 5 seconds
-              if (prevState === 'running' && (newState === 'idle' || newState === 'interrupted')) {
-                const startTime = runningStartTimes.current[ws.id];
-                const elapsed = startTime ? (Date.now() - startTime) / 1000 : 0;
-                delete runningStartTimes.current[ws.id];
-
-                if (elapsed >= 5) {
-                  const duration = elapsed >= 60
-                    ? `${Math.floor(elapsed / 60)}m${Math.round(elapsed % 60)}s`
-                    : `${Math.round(elapsed)}s`;
-                  const msg = newState === 'interrupted'
-                    ? `Interrupted in ${ws.title} (${duration})`
-                    : `Finished in ${ws.title} (${duration})`;
-                  addNotification({
-                    surfaceId: cmd.surfaceId as SurfaceId,
-                    workspaceId: ws.id,
-                    text: msg,
-                  });
-                  window.wmux?.notification?.fire({
-                    surfaceId: cmd.surfaceId,
-                    text: msg,
-                    title: 'wmux',
-                  });
-                }
-              }
-              break;
-            }
-          }
-          break;
-        }
-      }
+      const ws = workspaceForSurface(cmd.surfaceId);
+      if (ws) handleSurfaceMetadata(cmd, ws, deps);
     });
     return unsub;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -381,6 +425,12 @@ export default function App() {
   useEffect(() => {
     if (!window.wmux?.hook?.onEvent) return;
     const unsub = window.wmux.hook.onEvent((event: any) => {
+      // Agent lifecycle (issue #53): Notification = agent needs input/permission,
+      // Stop = agent finished its turn. These have no `tool`, so handle first.
+      if (event?.event === 'Notification' || event?.event === 'Stop') {
+        handleAgentLifecycleEvent(event, addNotification);
+        return;
+      }
       if (!event?.tool) return;
       const state = useStore.getState();
       const wsId = state.activeWorkspaceId;
