@@ -29,8 +29,11 @@ export default function PaneWrapper({
   leaf,
   workspaceId,
   isFocused,
+  surfaceDrag,
   onSurfaceDragStart,
   onSurfaceDragEnd,
+  onSurfaceDragPreviewTarget,
+  onClearSurfaceDragPreview,
   onSurfaceDragCommit,
 }: PaneWrapperProps) {
   const { surfaces, activeSurfaceIndex, paneId } = leaf;
@@ -405,10 +408,24 @@ export default function PaneWrapper({
     }
   };
 
-  const preventDragDefault = (e: React.DragEvent) => {
+  const handleDropZoneDragOver = (e: React.DragEvent, target: SurfaceDragPreviewTarget) => {
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
+
+    if (!surfaceDrag) return;
+    onSurfaceDragPreviewTarget(paneId, target);
+  };
+
+  const handleDropZonesDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const outside =
+      e.clientX < rect.left ||
+      e.clientX > rect.right ||
+      e.clientY < rect.top ||
+      e.clientY > rect.bottom;
+
+    if (outside) onClearSurfaceDragPreview();
   };
 
   const handleReorderSurface = (surfaceId: SurfaceId, newIndex: number) => {
@@ -453,12 +470,12 @@ export default function PaneWrapper({
           className="pane-wrapper__unfocused-overlay"
           style={{ opacity: isFocused ? 0 : 1 }}
         />
-        <div className="pane-wrapper__drop-zones">
-          <div className="pane-drop-zone pane-drop-zone--left" onDragOver={preventDragDefault} onDrop={(e) => handleEdgeDrop(e, 'left')} />
-          <div className="pane-drop-zone pane-drop-zone--right" onDragOver={preventDragDefault} onDrop={(e) => handleEdgeDrop(e, 'right')} />
-          <div className="pane-drop-zone pane-drop-zone--top" onDragOver={preventDragDefault} onDrop={(e) => handleEdgeDrop(e, 'up')} />
-          <div className="pane-drop-zone pane-drop-zone--bottom" onDragOver={preventDragDefault} onDrop={(e) => handleEdgeDrop(e, 'down')} />
-          <div className="pane-drop-zone pane-drop-zone--center" onDragOver={preventDragDefault} onDrop={handleCenterDrop} />
+        <div className="pane-wrapper__drop-zones" onDragLeave={handleDropZonesDragLeave}>
+          <div className="pane-drop-zone pane-drop-zone--left" onDragOver={(e) => handleDropZoneDragOver(e, 'left')} onDrop={(e) => handleEdgeDrop(e, 'left')} />
+          <div className="pane-drop-zone pane-drop-zone--right" onDragOver={(e) => handleDropZoneDragOver(e, 'right')} onDrop={(e) => handleEdgeDrop(e, 'right')} />
+          <div className="pane-drop-zone pane-drop-zone--top" onDragOver={(e) => handleDropZoneDragOver(e, 'up')} onDrop={(e) => handleEdgeDrop(e, 'up')} />
+          <div className="pane-drop-zone pane-drop-zone--bottom" onDragOver={(e) => handleDropZoneDragOver(e, 'down')} onDrop={(e) => handleEdgeDrop(e, 'down')} />
+          <div className="pane-drop-zone pane-drop-zone--center" onDragOver={(e) => handleDropZoneDragOver(e, 'center')} onDrop={handleCenterDrop} />
         </div>
       </div>
     </div>
