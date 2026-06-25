@@ -1,23 +1,32 @@
 import type { PaneId, SplitNode, SurfaceId, SurfaceRef } from '../../../shared/types';
+import { useStore } from '../../store';
 import '../../styles/splitpane.css';
+import { getSurfaceLabel } from './surface-label';
 
 interface SplitPreviewOverlayProps {
   tree: SplitNode;
   destinationPaneId: PaneId;
   draggedSurfaceId: SurfaceId;
+  workspaceShell?: string;
 }
 
 export default function SplitPreviewOverlay({
   tree,
   destinationPaneId,
   draggedSurfaceId,
+  workspaceShell,
 }: SplitPreviewOverlayProps) {
+  const agentMeta = useStore((state) => state.agentMeta);
+  const getPreviewSurfaceLabel = (surface: SurfaceRef) =>
+    getSurfaceLabel(surface, agentMeta.get(surface.id)?.label, workspaceShell);
+
   return (
     <div className="split-preview-overlay" aria-hidden="true">
       <PreviewNode
         node={tree}
         destinationPaneId={destinationPaneId}
         draggedSurfaceId={draggedSurfaceId}
+        getPreviewSurfaceLabel={getPreviewSurfaceLabel}
       />
     </div>
   );
@@ -27,10 +36,12 @@ function PreviewNode({
   node,
   destinationPaneId,
   draggedSurfaceId,
+  getPreviewSurfaceLabel,
 }: {
   node: SplitNode;
   destinationPaneId: PaneId;
   draggedSurfaceId: SurfaceId;
+  getPreviewSurfaceLabel: (surface: SurfaceRef) => string;
 }) {
   if (node.type === 'leaf') {
     const isDestination = node.paneId === destinationPaneId;
@@ -47,7 +58,7 @@ function PreviewNode({
                 index === node.activeSurfaceIndex ? 'split-preview-pane__tab--active' : '',
               ].filter(Boolean).join(' ')}
             >
-              {surfaceLabel(surface)}
+              {getPreviewSurfaceLabel(surface)}
             </span>
           ))}
         </div>
@@ -71,6 +82,7 @@ function PreviewNode({
           node={left}
           destinationPaneId={destinationPaneId}
           draggedSurfaceId={draggedSurfaceId}
+          getPreviewSurfaceLabel={getPreviewSurfaceLabel}
         />
       </div>
       <div className={`split-preview-container__divider split-preview-container__divider--${node.direction}`} />
@@ -79,25 +91,9 @@ function PreviewNode({
           node={right}
           destinationPaneId={destinationPaneId}
           draggedSurfaceId={draggedSurfaceId}
+          getPreviewSurfaceLabel={getPreviewSurfaceLabel}
         />
       </div>
     </div>
   );
-}
-
-function surfaceLabel(surface: SurfaceRef): string {
-  if (surface.customTitle) return surface.customTitle;
-
-  switch (surface.type) {
-    case 'terminal':
-      return 'Terminal';
-    case 'browser':
-      return 'Browser';
-    case 'markdown':
-      return 'Markdown';
-    case 'diff':
-      return 'Diff';
-    default:
-      return 'Surface';
-  }
 }

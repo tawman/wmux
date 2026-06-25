@@ -19,7 +19,7 @@ import type {
   SurfaceDragPreview,
   SurfaceDragPreviewTarget,
 } from './components/SplitPane/drag-preview-types';
-import { previewMoveSurface, previewSplitAndMoveSurface } from './store/split-preview-utils';
+import { buildSurfaceDragPreview } from './components/SplitPane/surface-drag-preview';
 
 const DEFAULT_SIDEBAR_WIDTH = 240;
 
@@ -701,31 +701,12 @@ export default function App() {
         return;
       }
 
-      const ws = useStore.getState().workspaces.find((workspace) => workspace.id === drag.workspaceId);
-      if (!ws || ws.id !== activeWorkspaceId) {
-        surfaceDragPreviewRef.current = null;
-        setSurfaceDragPreview(null);
-        return;
-      }
-
-      const result = pending.target === 'center'
-        ? previewMoveSurface(ws.splitTree, drag.sourcePaneId, drag.surfaceId, pending.targetPaneId)
-        : previewSplitAndMoveSurface(ws.splitTree, pending.targetPaneId, drag.sourcePaneId, drag.surfaceId, pending.target);
-
-      if (!result) {
-        surfaceDragPreviewRef.current = null;
-        setSurfaceDragPreview(null);
-        return;
-      }
-
-      const nextPreview: SurfaceDragPreview = {
-        ...drag,
-        targetPaneId: pending.targetPaneId,
-        target: pending.target,
-        previewTree: result.tree,
-        destinationPaneId: result.destinationPaneId,
-        collapsesSourcePane: result.collapsesSourcePane,
-      };
+      const nextPreview = buildSurfaceDragPreview({
+        workspaces: useStore.getState().workspaces,
+        activeWorkspaceId,
+        drag,
+        pendingTarget: pending,
+      });
       surfaceDragPreviewRef.current = nextPreview;
       setSurfaceDragPreview(nextPreview);
     });
@@ -879,6 +860,7 @@ export default function App() {
                   tree={surfaceDragPreview.previewTree}
                   destinationPaneId={surfaceDragPreview.destinationPaneId}
                   draggedSurfaceId={surfaceDragPreview.surfaceId}
+                  workspaceShell={ws.shell}
                 />
               )}
             </div>

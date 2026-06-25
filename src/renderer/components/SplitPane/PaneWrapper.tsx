@@ -9,13 +9,13 @@ import NotificationRing from '../Terminal/NotificationRing';
 import SurfaceTabBar from './SurfaceTabBar';
 import { useStore } from '../../store';
 import type { SurfaceDragCommitOptions, SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
+import {
+  getSurfaceDragDropDecision,
+  parseSurfaceDragData,
+  type SurfaceDragData,
+} from './surface-drag-preview';
 import '../../styles/splitpane.css';
 import '../../styles/terminal.css';
-
-interface SurfaceDragData {
-  sourcePaneId: PaneId;
-  surfaceId: SurfaceId;
-}
 
 interface PaneWrapperProps {
   paneId: PaneId;
@@ -397,23 +397,15 @@ export default function PaneWrapper({
   };
 
   const getValidSurfaceDragData = (data: string): SurfaceDragData | null => {
-    try {
-      const parsed = JSON.parse(data) as Partial<Record<'sourcePaneId' | 'surfaceId', unknown>>;
-      if (typeof parsed.sourcePaneId !== 'string' || typeof parsed.surfaceId !== 'string') {
-        return null;
-      }
+    const parsed = parseSurfaceDragData(data);
+    if (!parsed) return null;
 
-      const sourcePaneId = parsed.sourcePaneId as PaneId;
-      const surfaceId = parsed.surfaceId as SurfaceId;
-      const sourceLeaf = getSourceLeaf(sourcePaneId);
-      if (!sourceLeaf?.surfaces.some((surface) => surface.id === surfaceId)) {
-        return null;
-      }
-
-      return { sourcePaneId, surfaceId };
-    } catch {
+    const sourceLeaf = getSourceLeaf(parsed.sourcePaneId);
+    if (!sourceLeaf?.surfaces.some((surface) => surface.id === parsed.surfaceId)) {
       return null;
     }
+
+    return parsed;
   };
 
   const handleEdgeDrop = (e: React.DragEvent, direction: 'left' | 'right' | 'up' | 'down') => {
@@ -432,13 +424,25 @@ export default function PaneWrapper({
         return;
       }
       const { sourcePaneId, surfaceId } = dragData;
-
-      if (sourcePaneId === paneId && surfaces.length === 1) {
+      const sourceLeaf = getSourceLeaf(sourcePaneId);
+      if (!sourceLeaf) {
         onSurfaceDragEnd();
         return;
       }
 
-      onSurfaceDragCommit({ clearZoom: true });
+      const decision = getSurfaceDragDropDecision({
+        target: 'edge',
+        sourcePaneId,
+        targetPaneId: paneId,
+        sourceSurfaceCount: sourceLeaf.surfaces.length,
+      });
+
+      if (decision.action === 'cancel') {
+        onSurfaceDragEnd();
+        return;
+      }
+
+      onSurfaceDragCommit(decision.commitOptions);
       splitAndMoveSurface(activeWorkspaceId, paneId, sourcePaneId, surfaceId, direction);
     } catch {
       onSurfaceDragEnd();
@@ -461,13 +465,26 @@ export default function PaneWrapper({
         return;
       }
       const { sourcePaneId, surfaceId } = dragData;
-      if (sourcePaneId !== paneId) {
-        const sourceLeaf = getSourceLeaf(sourcePaneId);
-        onSurfaceDragCommit({ clearZoom: sourceLeaf?.surfaces.length === 1 });
-        moveSurface(activeWorkspaceId, sourcePaneId, surfaceId, paneId);
+      const sourceLeaf = getSourceLeaf(sourcePaneId);
+      if (!sourceLeaf) {
+        onSurfaceDragEnd();
         return;
       }
-      onSurfaceDragEnd();
+
+      const decision = getSurfaceDragDropDecision({
+        target: 'center',
+        sourcePaneId,
+        targetPaneId: paneId,
+        sourceSurfaceCount: sourceLeaf.surfaces.length,
+      });
+
+      if (decision.action === 'cancel') {
+        onSurfaceDragEnd();
+        return;
+      }
+
+      onSurfaceDragCommit(decision.commitOptions);
+      moveSurface(activeWorkspaceId, sourcePaneId, surfaceId, paneId);
     } catch {
       onSurfaceDragEnd();
     }
