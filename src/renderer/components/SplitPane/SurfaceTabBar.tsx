@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { SurfaceRef, SurfaceId, PaneId, WorkspaceId, QuickLaunchProfile, ShellInfo } from '../../../shared/types';
 import { useStore } from '../../store';
 import { IconAdd, IconSplit, IconSplitDown, IconClose, IconCaret } from './icons';
+import type { SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
 
 interface SurfaceTabBarProps {
   paneId: PaneId;
@@ -24,6 +25,9 @@ interface SurfaceTabBarProps {
   onSplitDown?: () => void;
   onDropSurface?: (sourcePaneId: PaneId, surfaceId: SurfaceId, targetPaneId: PaneId) => void;
   onReorderSurface?: (surfaceId: SurfaceId, newIndex: number) => void;
+  surfaceDrag?: SurfaceDragPayload | null;
+  onSurfaceDragPreviewTarget?: (targetPaneId: PaneId, target: SurfaceDragPreviewTarget) => void;
+  onClearSurfaceDragPreview?: () => void;
   onSurfaceDragStart?: (surfaceId: SurfaceId) => void;
   onSurfaceDragEnd?: () => void;
   isDragActive?: boolean;
@@ -84,6 +88,9 @@ export default function SurfaceTabBar({
   onSplitDown,
   onDropSurface,
   onReorderSurface,
+  surfaceDrag,
+  onSurfaceDragPreviewTarget,
+  onClearSurfaceDragPreview,
   onSurfaceDragStart,
   onSurfaceDragEnd,
   isDragActive,
@@ -211,6 +218,12 @@ export default function SurfaceTabBar({
     else onSplitDown?.();
   }, [onSplitRight, onSplitDown]);
 
+  const requestCenterPreview = useCallback(() => {
+    if (surfaceDrag?.sourcePaneId !== paneId) {
+      onSurfaceDragPreviewTarget?.(paneId, 'center');
+    }
+  }, [onSurfaceDragPreviewTarget, paneId, surfaceDrag]);
+
   // Always show tab bar (even for 1 surface — like browser tabs)
   return (
     <div
@@ -219,6 +232,7 @@ export default function SurfaceTabBar({
       onDragOver={(e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
+        requestCenterPreview();
       }}
       onDrop={(e) => {
         e.preventDefault();
@@ -248,7 +262,12 @@ export default function SurfaceTabBar({
         }
         onSurfaceDragEnd?.();
       }}
-      onDragLeave={() => setInsertIndex(null)}
+      onDragLeave={() => {
+        setInsertIndex(null);
+        if (surfaceDrag?.sourcePaneId !== paneId) {
+          onClearSurfaceDragPreview?.();
+        }
+      }}
     >
       <div className="surface-tab-bar__tabs">
         {surfaces.map((surface, index) => {
@@ -298,6 +317,7 @@ export default function SurfaceTabBar({
                 const midpoint = rect.left + rect.width / 2;
                 const newInsertIndex = e.clientX < midpoint ? index : index + 1;
                 setInsertIndex(newInsertIndex);
+                requestCenterPreview();
               }}
             >
               <span className="surface-tab__icon">{surfaceIcon(surface.type, isAgent)}</span>

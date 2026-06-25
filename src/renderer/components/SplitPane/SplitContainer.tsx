@@ -2,7 +2,7 @@ import React, { useCallback } from 'react';
 import { SplitNode, PaneId, WorkspaceId } from '../../../shared/types';
 import PaneWrapper from './PaneWrapper';
 import SplitDivider from './SplitDivider';
-import type { SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
+import type { SurfaceDragCommitOptions, SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
 import '../../styles/splitpane.css';
 
 /** Get all pane IDs from a subtree — used as stable React key */
@@ -27,7 +27,7 @@ interface SplitContainerProps {
   onSurfaceDragEnd: () => void;
   onSurfaceDragPreviewTarget: (targetPaneId: PaneId, target: SurfaceDragPreviewTarget) => void;
   onClearSurfaceDragPreview: () => void;
-  onSurfaceDragCommit: () => void;
+  onSurfaceDragCommit: (options?: SurfaceDragCommitOptions) => void;
 }
 
 export default function SplitContainer({

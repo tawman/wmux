@@ -13,7 +13,12 @@ import BrowserPane from './components/Browser/BrowserPane';
 import Tutorial from './components/Tutorial/Tutorial';
 import SplitPreviewOverlay from './components/SplitPane/SplitPreviewOverlay';
 import { initPipeBridge } from './pipe-bridge';
-import type { SurfaceDragPayload, SurfaceDragPreview, SurfaceDragPreviewTarget } from './components/SplitPane/drag-preview-types';
+import type {
+  SurfaceDragCommitOptions,
+  SurfaceDragPayload,
+  SurfaceDragPreview,
+  SurfaceDragPreviewTarget,
+} from './components/SplitPane/drag-preview-types';
 import { previewMoveSurface, previewSplitAndMoveSurface } from './store/split-preview-utils';
 
 const DEFAULT_SIDEBAR_WIDTH = 240;
@@ -736,8 +741,8 @@ export default function App() {
     setSurfaceDragPreview(null);
   }, []);
 
-  const handleSurfaceDragCommit = useCallback(() => {
-    if (surfaceDragPreviewRef.current) setZoomedPaneId(null);
+  const handleSurfaceDragCommit = useCallback((options?: SurfaceDragCommitOptions) => {
+    if (options?.clearZoom || surfaceDragPreviewRef.current) setZoomedPaneId(null);
     pendingPreviewTargetRef.current = null;
     if (previewFrameRef.current !== null) {
       cancelAnimationFrame(previewFrameRef.current);

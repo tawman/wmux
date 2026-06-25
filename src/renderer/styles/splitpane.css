@@ -291,6 +291,14 @@
 .pane-drop-zone--top:hover    { border-bottom-color: #89b4fa; }
 .pane-drop-zone--bottom:hover { border-top-color: #89b4fa; }
 
+body.wmux-dragging .pane-drop-zone--left:hover,
+body.wmux-dragging .pane-drop-zone--right:hover,
+body.wmux-dragging .pane-drop-zone--top:hover,
+body.wmux-dragging .pane-drop-zone--bottom:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
 .pane-drop-zone--center:hover {
   background: rgba(166, 227, 161, 0.12);
   border-color: #a6e3a1;

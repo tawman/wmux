@@ -15,3 +15,7 @@ export interface SurfaceDragPreview extends SurfaceDragPayload {
   destinationPaneId: PaneId;
   collapsesSourcePane: boolean;
 }
+
+export interface SurfaceDragCommitOptions {
+  clearZoom?: boolean;
+}

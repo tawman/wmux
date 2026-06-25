@@ -8,7 +8,7 @@ import DiffPane from '../Diff/DiffPane';
 import NotificationRing from '../Terminal/NotificationRing';
 import SurfaceTabBar from './SurfaceTabBar';
 import { useStore } from '../../store';
-import type { SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
+import type { SurfaceDragCommitOptions, SurfaceDragPayload, SurfaceDragPreviewTarget } from './drag-preview-types';
 import '../../styles/splitpane.css';
 import '../../styles/terminal.css';
 
@@ -27,7 +27,7 @@ interface PaneWrapperProps {
   onSurfaceDragEnd: () => void;
   onSurfaceDragPreviewTarget: (targetPaneId: PaneId, target: SurfaceDragPreviewTarget) => void;
   onClearSurfaceDragPreview: () => void;
-  onSurfaceDragCommit: () => void;
+  onSurfaceDragCommit: (options?: SurfaceDragCommitOptions) => void;
 }
 
 export default function PaneWrapper({
@@ -326,9 +326,19 @@ export default function PaneWrapper({
   };
 
   const handleDropSurface = (sourcePaneId: PaneId, surfaceId: SurfaceId, targetPaneId: PaneId) => {
-    if (activeWorkspaceId) {
-      moveSurface(activeWorkspaceId, sourcePaneId, surfaceId, targetPaneId);
+    if (!activeWorkspaceId || targetPaneId !== paneId || sourcePaneId === targetPaneId) {
+      onSurfaceDragEnd();
+      return;
     }
+
+    const sourceLeaf = getSourceLeaf(sourcePaneId);
+    if (!sourceLeaf?.surfaces.some((surface) => surface.id === surfaceId)) {
+      onSurfaceDragEnd();
+      return;
+    }
+
+    onSurfaceDragCommit({ clearZoom: sourceLeaf.surfaces.length === 1 });
+    moveSurface(activeWorkspaceId, sourcePaneId, surfaceId, targetPaneId);
   };
 
   const handleCloseSurface = (surfaceId: SurfaceId) => {
@@ -379,6 +389,13 @@ export default function PaneWrapper({
     }
   };
 
+  const getSourceLeaf = (sourcePaneId: PaneId) => {
+    const ws = activeWorkspaceId
+      ? useStore.getState().workspaces.find(w => w.id === activeWorkspaceId)
+      : undefined;
+    return ws ? findLeaf(ws.splitTree, sourcePaneId) : undefined;
+  };
+
   const getValidSurfaceDragData = (data: string): SurfaceDragData | null => {
     try {
       const parsed = JSON.parse(data) as Partial<Record<'sourcePaneId' | 'surfaceId', unknown>>;
@@ -388,10 +405,7 @@ export default function PaneWrapper({
 
       const sourcePaneId = parsed.sourcePaneId as PaneId;
       const surfaceId = parsed.surfaceId as SurfaceId;
-      const ws = activeWorkspaceId
-        ? useStore.getState().workspaces.find(w => w.id === activeWorkspaceId)
-        : undefined;
-      const sourceLeaf = ws ? findLeaf(ws.splitTree, sourcePaneId) : undefined;
+      const sourceLeaf = getSourceLeaf(sourcePaneId);
       if (!sourceLeaf?.surfaces.some((surface) => surface.id === surfaceId)) {
         return null;
       }
@@ -424,7 +438,7 @@ export default function PaneWrapper({
         return;
       }
 
-      onSurfaceDragCommit();
+      onSurfaceDragCommit({ clearZoom: true });
       splitAndMoveSurface(activeWorkspaceId, paneId, sourcePaneId, surfaceId, direction);
     } catch {
       onSurfaceDragEnd();
@@ -448,7 +462,8 @@ export default function PaneWrapper({
       }
       const { sourcePaneId, surfaceId } = dragData;
       if (sourcePaneId !== paneId) {
-        onSurfaceDragCommit();
+        const sourceLeaf = getSourceLeaf(sourcePaneId);
+        onSurfaceDragCommit({ clearZoom: sourceLeaf?.surfaces.length === 1 });
         moveSurface(activeWorkspaceId, sourcePaneId, surfaceId, paneId);
         return;
       }
@@ -504,6 +519,9 @@ export default function PaneWrapper({
         onSplitDown={handleSplitDown}
         onDropSurface={handleDropSurface}
         onReorderSurface={handleReorderSurface}
+        surfaceDrag={surfaceDrag}
+        onSurfaceDragPreviewTarget={onSurfaceDragPreviewTarget}
+        onClearSurfaceDragPreview={onClearSurfaceDragPreview}
         onSurfaceDragStart={(surfaceId) => onSurfaceDragStart({
           workspaceId,
           sourcePaneId: paneId,
