@@ -28,7 +28,11 @@ export default function BrowserPane({ initialUrl = 'https://github.com/amirlehma
     }
     setUrl(resolved);
     if (webviewRef.current) {
-      webviewRef.current.loadURL(resolved);
+      // loadURL rejects with ERR_ABORTED when a navigation is superseded (a
+      // server redirect/refresh) or the target is unreachable. Both are benign
+      // and already surfaced via the did-*-load events below, so swallow the
+      // rejection instead of letting it bubble to the main process console.
+      webviewRef.current.loadURL(resolved).catch(() => {});
     }
   }, []);
 
