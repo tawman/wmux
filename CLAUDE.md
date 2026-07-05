@@ -30,6 +30,62 @@ Project lives in `OneDrive - Pulsa` (path with spaces). This breaks:
 
 ---
 
+## Fork Build on production/local
+
+This repo is **tawman's fork** of `amirlehmam/wmux`; we run wmux from local builds of the
+`production/local` branch. Follow these tenets when working in this fork even if the local `wmux`
+skill isn't installed on your machine.
+
+**Branches**
+- `master` — pure mirror of upstream `amirlehmam/wmux`. Never merge fork features into it; it is
+  only the clean base for upstream PRs and for pulling upstream changes.
+- `production/local` — long-lived integration branch and the **default branch**; the build we run.
+- Feature branches by upstreamability: `feature/wmux-<slug>` off `master` (upstream-candidate,
+  eventually PR'd to `amirlehmam/wmux`); `feature/local-<slug>` off `production/local` (local-only).
+
+**Merging features → release notes**
+- Land features on `production/local` via a **fork PR** (`gh pr create --base production/local`),
+  merged on GitHub — NOT a local `git merge`. GitHub `--generate-notes` groups the changelog by PR,
+  which only works when changes arrive as PRs. (The PR-merge commit is GitHub-signed — "Verified"
+  on GitHub but `%G?`=`E` locally; normal, not a signing failure.)
+
+**Versioning (semver)**
+- Local builds use **`<upstream-base>-local.<N>`** (e.g. `0.15.1-local.1`); `<N>` resets to 1 when
+  the upstream base changes. `package.json` is the source of truth. rcedit's PE
+  `file-version`/`product-version` are numeric-only — strip the suffix to bare `x.y.z` there.
+
+**Releases (manual, local)**
+- No auto-update feed; updater disabled (`WMUX_DISABLE_UPDATER=1`). Build locally, then release
+  **manually via gh**: `gh release create v<version> --repo tawman/wmux --target production/local
+  --generate-notes --notes-start-tag <prev-tag>`, attaching the built zip. Install via
+  build → stage → `C:\tools\swap-wmux.cmd`. Runbook: `docs/LOCAL-RELEASE.md`; packaging: the
+  **Release Process** section below.
+
+**Upstream sync — inspect BEFORE it reaches production/local (security gate)**
+Upstream is a fast-moving single-maintainer project; treat incoming code as untrusted until reviewed.
+Never `git pull upstream` straight into `production/local` — isolate, scan, then merge.
+1. **Isolate:** `git fetch upstream` → `git checkout master` → `git merge --ff-only upstream/master`.
+2. **Review + scan the incoming diff on `master` before merging into `production/local`:**
+   - **Read the diff** `git log -p master@{1}..master` for the audit's hot spots: new network egress
+     (`fetch`/`http`/`ws`/`child_process`/`eval`), changes to `src/main/claude-context.ts` (config
+     injection / MCP pin), `updater.ts`, `cdp-proxy.ts`, `pty-manager.ts`, and any new/bumped entries
+     in `package.json` / `package-lock.json`.
+   - **Deps:** `npm ci && npm audit` — flag only **newly-introduced** advisories (the tree already
+     carries known ones: EOL Electron, dev-toolchain — a bare `--audit-level=high` always fails here,
+     so diff results vs the prior baseline; scrutinize any added/changed dependency).
+   - **Secrets:** `gitleaks git --log-opts="master@{1}..master"` (if installed).
+   - **Optional SAST:** `semgrep` / `trivy fs .` for dangerous Electron patterns (`eval`,
+     `shell.openExternal`, raw `child_process`).
+3. **Merge only if clean:** `git checkout production/local` → `git merge master` → reset the version
+   to `<new-base>-local.1`. (Prefer this scan-before-merge flow over a `.git/hooks/post-merge`
+   auto-rollback: that hook isn't version-controlled/shared and only scans after bad code has landed.)
+
+**Authorship**
+- Commits are the fork owner's, SSH-signed. Do **not** add AI/Claude attribution (no co-author
+  trailers, no "Generated with…") to commits, PR descriptions, or comments.
+
+---
+
 ## Architecture
 
 ```
