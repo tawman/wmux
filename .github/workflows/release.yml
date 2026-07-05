@@ -15,6 +15,10 @@ permissions:
 jobs:
   build-sign-release:
     runs-on: windows-latest
+    # Upstream-only. On forks (e.g. tawman/wmux) this job is skipped, so pushing
+    # local `v*-local.N` tags never triggers the upstream build/publish (which
+    # would also fail at rcedit on the `-local` suffix). Mirrors winget.yml.
+    if: ${{ github.repository == 'amirlehmam/wmux' }}
 
     steps:
       - uses: actions/checkout@v4
