@@ -60,9 +60,21 @@ Run in `C:\git\wmux-fork` on `production/local`:
      setup), so tag it directly instead of re-bumping:
      `git commit -am "chore(local): 0.15.1-local.1" && git tag v0.15.1-local.1`.
 
-2. **Build** per `CLAUDE.md` → "Release Process" (`npm run build:main`,
-   `npx vite build`, ASAR pack), producing `wmux-<version>-win-x64.zip`, **with
-   these two fork adaptations:**
+2. **Build.** The fork ships an automated packager — **`bash scripts/pack-local.sh`** —
+   that runs the whole flow (`build:main` + `vite build` + ASAR pack + assemble +
+   rcedit + zip) and writes `release/wmux/` (the swap folder) and
+   `release/wmux-<version>-win-x64.zip` (the release artifact). It already applies
+   both fork adaptations below. If packaging by hand instead, follow `CLAUDE.md` →
+   "Release Process" **with these adaptations:**
+
+   c. **Base = `node_modules/electron/dist`, not the previous release zip.** The
+      install is a *full Electron runtime* (`wmux.exe` = renamed `electron.exe` +
+      DLLs/paks/snapshots). CLAUDE.md's "unzip the previous release" base is only
+      valid when the Electron **major is unchanged**. On an Electron major upgrade
+      the old zip carries the *old* runtime (e.g. 33 lacks `dxcompiler.dll` /
+      `dxil.dll` that 43 ships), so always base the staging on the currently
+      installed `node_modules/electron/dist`. `scripts/pack-local.sh` does this.
+
 
    a. **rcedit — strip the suffix.** rcedit's PE `file-version`/`product-version`
       are numeric-only (`x.y.z.w`) and reject `-local`. Derive a bare base:
