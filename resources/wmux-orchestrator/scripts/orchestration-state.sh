@@ -9,14 +9,39 @@ ORCH_BASE="${TMPDIR:-/tmp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JSON_TOOL="$SCRIPT_DIR/json-tool.js"
 
-# Find the active orchestration directory (most recent state.json with status "running")
+# Find the active orchestration directory (most recent state.json with status "running").
+#
+# Trust hardening (issue #2 / F-9): don't blindly follow any running state.json
+# found in $TMPDIR. Only accept one whose `id` is self-consistent with its
+# containing directory name (dir basename == wmux-orch-<state.id>) and — where
+# the platform reports it — is owned by the current user. A foreign or planted
+# state.json (mismatched/missing id, or owned by another user) is ignored.
 find_active_orch() {
   local latest=""
   local latest_time=0
+  local self_uid
+  self_uid=$(id -u 2>/dev/null)
   for dir in "$ORCH_BASE"/wmux-orch-*/; do
     [ -d "$dir" ] || continue
     local state="$dir/state.json"
     [ -f "$state" ] || continue
+
+    # Ownership marker: id inside must match the directory it lives in.
+    local dir_name state_id
+    dir_name=$(basename "$dir")
+    state_id=$(node "$JSON_TOOL" get "$state" .id 2>/dev/null)
+    [ -n "$state_id" ] || continue
+    [ "$dir_name" = "wmux-orch-$state_id" ] || continue
+
+    # Best-effort same-user check. Only rejects when BOTH the current uid and
+    # the file owner uid are known and differ; skipped where stat/id give
+    # nothing so the happy path never breaks on platforms without uid semantics.
+    if [ -n "$self_uid" ]; then
+      local owner_uid
+      owner_uid=$(stat -c %u "$state" 2>/dev/null || stat -f %u "$state" 2>/dev/null || echo "")
+      [ -n "$owner_uid" ] && [ "$owner_uid" != "$self_uid" ] && continue
+    fi
+
     local status
     status=$(node "$JSON_TOOL" get "$state" .status 2>/dev/null)
     if [ "$status" = "running" ]; then
