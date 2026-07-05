@@ -269,6 +269,44 @@ async function cmdSendKey(args: string[]): Promise<void> {
   print(await sendV2('surface.send_key', payload));
 }
 
+// Agent-to-agent messaging: the inbound/reply half of hub-and-spoke coordination.
+//   wmux a2a send --to <id> [--kind <k>] <payload...>   (payload parsed as JSON, else kept as string)
+//   wmux a2a poll [--to <id>] [--peek]                  (drains by default; --peek leaves messages queued)
+//   wmux a2a status
+// --to/--from default to the caller's WMUX_SURFACE_ID when run inside a pane.
+async function cmdA2a(args: string[]): Promise<void> {
+  const sub = args[1];
+  const self = process.env.WMUX_SURFACE_ID;
+  switch (sub) {
+    case 'send': {
+      const to = getFlag(args, '--to');
+      if (!to) { console.error('Usage: wmux a2a send --to <id> [--kind <kind>] <payload>'); process.exit(1); }
+      const from = getFlag(args, '--from') || self;
+      if (!from) { console.error('No sender id. Pass --from <id> or run inside a wmux pane.'); process.exit(1); }
+      const kind = getFlag(args, '--kind');
+      const rest = stripFlag(stripFlag(stripFlag(args.slice(2), '--to'), '--from'), '--kind');
+      const raw = rest.join(' ');
+      let payload: unknown = raw;
+      try { payload = JSON.parse(raw); } catch { /* keep as string */ }
+      print(await sendV2('a2a.send', { to, from, kind, payload }));
+      break;
+    }
+    case 'poll': {
+      const to = getFlag(args, '--to') || self;
+      if (!to) { console.error('No inbox id. Pass --to <id> or run inside a wmux pane.'); process.exit(1); }
+      const drain = !args.includes('--peek');
+      print(await sendV2('a2a.poll', { to, drain }));
+      break;
+    }
+    case 'status':
+      print(await sendV2('a2a.status'));
+      break;
+    default:
+      console.error('Usage: wmux a2a <send|poll|status> ...');
+      process.exit(1);
+  }
+}
+
 async function cmdNotify(args: string[]): Promise<void> {
   const titleIdx = args.indexOf('--title');
   const bodyIdx = args.indexOf('--body');
@@ -359,6 +397,9 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void> | void> = {
   // Terminal interaction
   send: cmdSend,
   'send-key': cmdSendKey,
+
+  // Agent-to-agent messaging (hub-and-spoke reply channel)
+  a2a: cmdA2a,
   'read-screen': async (args) => {
     const lines = args.find((a, i) => args[i - 1] === '--lines');
     print(await sendV2('surface.read_text', { lines: lines ? parseInt(lines) : 50 }));

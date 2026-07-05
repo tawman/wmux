@@ -18,6 +18,7 @@ import { ensureClaudeContext, ensureClaudeHooks, ensureChromeDevtoolsConfig, ens
 import { ensureOpencodeContext, ensureOpencodePlugin } from './opencode-context';
 import { applyExternalActivity } from './claude-observer';
 import { startOrchestrationWatcher } from './orchestration-watcher';
+import { A2AStore } from './a2a-store';
 import fs from 'fs';
 import path from 'path';
 
@@ -77,6 +78,10 @@ function spawnAgentBatch(
 }
 
 const windowManager = new WindowManager();
+// Agent-to-agent inbox: the inbound half of coordinator<->worker messaging (a2a.* V2
+// methods below). Outbound is surface.send_text; this lets a recipient drain messages
+// left for it. In-memory for the app's lifetime.
+const a2aStore = new A2AStore();
 // Per-instance secret that authenticates privileged (V2) pipe requests.
 // Generated/persisted once per APPDATA dir and injected into spawned shells
 // as WMUX_PIPE_TOKEN so the CLI and hooks can authenticate.
@@ -534,6 +539,38 @@ app.whenReady().then(() => {
         // Read screen content — not easily available from PTY buffer directly.
         // Return a note that this requires xterm.js serializer addon in the renderer.
         respond({ text: '', note: 'Screen reading requires renderer-side xterm serializer' });
+        break;
+      }
+
+      // ─── Agent-to-agent messaging V2 handlers ─────────────────────────────
+      // Inbound half of hub-and-spoke coordination: a sender leaves a structured
+      // message for a recipient (addressed by surfaceId or a logical role), which
+      // the recipient drains on its own schedule via a2a.poll. Outbound injection
+      // into a pane is surface.send_text; this is the reply/queue channel it lacked.
+      case 'a2a.send': {
+        try {
+          const stored = a2aStore.send({
+            to: request.params?.to,
+            from: request.params?.from,
+            kind: request.params?.kind,
+            payload: request.params?.payload,
+          });
+          respond({ ok: true, id: stored.id, ts: stored.ts });
+        } catch (err: any) { respondError(-32602, err.message); }
+        break;
+      }
+      case 'a2a.poll': {
+        try {
+          const to = request.params?.to;
+          if (!to) { respondError(-32602, 'a2a.poll: "to" is required'); break; }
+          const drain = request.params?.drain !== false;
+          const messages = a2aStore.poll(to, { drain });
+          respond({ messages });
+        } catch (err: any) { respondError(-32000, err.message); }
+        break;
+      }
+      case 'a2a.status': {
+        respond({ inboxes: a2aStore.status() });
         break;
       }
       case 'surface.trigger_flash': {
