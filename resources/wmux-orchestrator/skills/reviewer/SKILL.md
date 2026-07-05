@@ -56,15 +56,38 @@ This is the most critical step. Agents worked in isolation — their changes mus
 3. **No orphaned code**: Check that removed exports aren't still imported elsewhere
 4. **No duplicate implementations**: Ensure two agents didn't implement the same thing differently
 
-## Step 4: Run Tests
+## Step 4: Run Tests (opt-in)
 
-If the project has tests, run them:
+Running the target repo's tests executes whatever it defines in `package.json`
+`scripts.test` — arbitrary code. When the changeset under review is untrusted, that
+is a supply-chain execution risk. **Do NOT run tests unless the user has opted in.**
+
+First resolve the exact command that would run (skip this whole step if there is none):
 
 ```bash
-npm test 2>&1 || true
+TEST_CMD=$(node "$PLUGIN_ROOT/scripts/json-tool.js" get package.json .scripts.test 2>/dev/null)
 ```
 
-Record test results. If tests fail:
+- If `package.json` is missing or `TEST_CMD` is empty or `null` → there is no test
+  script. Record **Test Results: NOT RUN (no test script)** and skip to Step 5.
+
+Otherwise gate execution:
+
+- **If the env var `WMUX_ORCH_RUN_TESTS=1` is set**, the user has pre-authorized test
+  runs. Echo the exact command, then run it:
+  ```bash
+  echo "Running tests (pre-authorized via WMUX_ORCH_RUN_TESTS): npm test -> $TEST_CMD"
+  npm test 2>&1 || true
+  ```
+- **Otherwise, ask first.** Show the user the exact command and ask:
+  **"Run the repo's tests (`npm test` → `<TEST_CMD>`)? This executes repo-defined
+  scripts. (yes / no)"** — default **no**. Do NOT run without explicit approval. Only
+  if the user says yes, run `npm test 2>&1 || true`.
+- If the user declines (or does not answer) → record **Test Results: NOT RUN
+  (skipped — opt-in not given)** and continue with Step 5. Skipping tests must never
+  block the rest of the review.
+
+If tests **did** run and fail:
 - Analyze the failure
 - If it's a minor fix (missing import, typo, type mismatch), fix it directly using Edit
 - If it's a major issue, document it in the review report for the user
@@ -115,7 +138,8 @@ Write the report with this structure:
 - [ ] [Any failed checks — describe the issue]
 
 ## Test Results
-- Result: [PASS / FAIL / NOT RUN]
+- Command: [`npm test` → the resolved scripts.test, or "n/a" if no test script]
+- Result: [PASS / FAIL / NOT RUN (no test script) / NOT RUN (skipped — opt-in not given) / NOT RUN (pre-authorized via WMUX_ORCH_RUN_TESTS)]
 - [Details of any failures and whether they were fixed]
 
 ## Corrections Applied
