@@ -27,7 +27,7 @@ const CATEGORY: Partial<Record<ShortcutAction, string>> = {
   togglePinWorkspace: 'Workspaces', markWorkspaceRead: 'Workspaces', openFolder: 'Workspaces',
   newWindow: 'Workspaces', closeWindow: 'Workspaces',
   newSurface: 'Tabs', nextSurface: 'Tabs', prevSurface: 'Tabs', reopenClosedSurface: 'Tabs',
-  renameSurface: 'Tabs', openMarkdownPanel: 'Tabs',
+  renameSurface: 'Tabs', openMarkdownPanel: 'Tabs', openDiffPanel: 'Tabs',
   splitRight: 'Panes', splitDown: 'Panes', splitBrowserRight: 'Panes', splitBrowserDown: 'Panes',
   focusLeft: 'Panes', focusRight: 'Panes', focusUp: 'Panes', focusDown: 'Panes',
   resizePaneLeft: 'Panes', resizePaneRight: 'Panes', resizePaneUp: 'Panes', resizePaneDown: 'Panes',
