@@ -315,6 +315,18 @@ export function useKeyboardShortcuts(
       fontSizeReset: () => useStore.getState().setTerminalPrefs({ fontSize: 13 }),
       openSettings: () => onOpenSettings?.(true),
       openMarkdownPanel: () => { if (activeWorkspaceId && focusedPaneId) addSurface(activeWorkspaceId, focusedPaneId, 'markdown'); },
+      // Focus-or-create: the diff panel is a singleton view of the working tree,
+      // so if the focused pane already has a diff tab, jump to it rather than
+      // stacking a duplicate (the auto-open hook in App.tsx dedups the same way).
+      openDiffPanel: () => {
+        if (!activeWorkspaceId || !focusedPaneId) return;
+        const st = useStore.getState();
+        const ws = st.workspaces.find((w) => w.id === activeWorkspaceId);
+        const leaf = ws && findLeaf(ws.splitTree, focusedPaneId);
+        const existingIdx = leaf ? leaf.surfaces.findIndex((s) => s.type === 'diff') : -1;
+        if (leaf && existingIdx >= 0) st.selectSurface(activeWorkspaceId, focusedPaneId, existingIdx);
+        else st.addSurface(activeWorkspaceId, focusedPaneId, 'diff');
+      },
       // commandPalette is opened by App.tsx's own listener; keep a no-op so we
       // still preventDefault on the combo. find/copyMode are short-circuited above.
       commandPalette: () => {},
