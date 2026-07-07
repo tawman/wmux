@@ -31,16 +31,6 @@ Agents drive wmux through the `wmux` **CLI** (`wmux split`, `wmux browser open`,
 
 > **Why the install folder is *not* on PATH.** The GUI (`wmux.exe`) and the CLI both want the name `wmux`, and on PATH `.EXE` shadows `.CMD` (PATHEXT ordering), so putting the *install* folder on PATH would make `wmux <command>` launch the GUI instead of the CLI. wmux sidesteps this by putting the shims — a directory with **no** `wmux.exe` — on the PATH of the shells it spawns, never the install folder. **Don't add the install folder to PATH.**
 
-### Optional: `wmux` in an external terminal (`setup.ps1`)
-
-The automatic wiring above applies only to shells **wmux spawns**. To run `wmux` from a terminal wmux did *not* spawn (a standalone PowerShell / Git Bash window), run — once — from the extracted ZIP folder:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup.ps1
-```
-
-It installs `wmux`/`wmux.cmd` shims into `~/.local/bin` and adds that folder (never the install folder) to your user PATH. Not needed for orchestration.
-
 <h1 align="center">wmux</h1>
 <p align="center">A visibility layer for Claude Code on Windows — see what your AI agent does in real-time</p>
 
