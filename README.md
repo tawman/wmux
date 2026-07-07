@@ -10,6 +10,38 @@
 > - 🧰 **Fix usability features** for daily development use
 > - 🔁 **Contribute changes back upstream** to wmux where they fit
 
+## 🤖 Additional Setup Required for Claude Orchestration
+
+This fork is distributed as a **portable ZIP**. The GUI (`wmux.exe`) is fully self-contained and runs on its own, but to drive wmux from **Claude Code** — the multi-agent orchestration this fork is built around — two one-time setup steps are needed.
+
+### 1. Install the wmux-orchestrator plugin (fork)
+
+The orchestrator is a Claude Code plugin that decomposes a task into parallel agents, one per visible wmux pane. This fork maintains its own copy at **[tawman/wmux-orchestrator](https://github.com/tawman/wmux-orchestrator)** (hardened and kept in lockstep with `production/local`). Register it as a Claude Code marketplace and install the plugin:
+
+```bash
+claude plugin marketplace add tawman/wmux-orchestrator
+claude plugin install wmux-orchestrator@wmux-orchestrator
+```
+
+> wmux also auto-installs a **bundled** copy of the plugin into `~/.claude/plugins/cache/` on startup, so basic orchestration works out of the box. Installing from the fork gives you the standalone, independently-updatable version — see the [orchestrator fork README](https://github.com/tawman/wmux-orchestrator#readme) for full usage and requirements.
+
+### 2. Install the `wmux` CLI shims (`setup.ps1`)
+
+Agents drive wmux through the `wmux` **CLI** (`wmux split`, `wmux browser open`, `wmux send`, …). From the extracted ZIP folder (the one containing `wmux.exe`), run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+It installs two shims — `wmux` (bash) and `wmux.cmd` (cmd) — into `~/.local/bin` and adds that folder to your user PATH. **Node.js must be installed** — the CLI is a Node script (the GUI is not).
+
+### Why this is needed — and why *not* to PATH the install folder
+
+The GUI (`wmux.exe`) and the CLI both want the command name `wmux`. On PATH, `.EXE` wins over `.CMD` (PATHEXT ordering), so **adding the install folder to PATH does not expose the CLI — it shadows it**: `wmux <command>` would launch the GUI instead of running the pipe client. `setup.ps1` avoids this by placing the shims in `~/.local/bin`, a directory with no `wmux.exe`. Inside a wmux pane the CLI already works via bundled shell integration; the shims cover shells that don't load it — external terminals and Claude Code's own Bash tool.
+
+- ✅ **Do** add `~/.local/bin` to PATH (`setup.ps1` does this for you).
+- ❌ **Don't** add the wmux install folder to PATH.
+
 <h1 align="center">wmux</h1>
 <p align="center">A visibility layer for Claude Code on Windows — see what your AI agent does in real-time</p>
 

@@ -55,6 +55,7 @@ cp -r resources/claude-instructions "$APPDIR/resources/claude-instructions"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions.md"
 cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
 mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
+cp installer/setup.ps1 "$APPDIR/setup.ps1"   # turnkey CLI-shim installer (see README "Additional Setup Required for Claude Orchestration")
 
 echo "-- [5/6] rcedit wmux.exe (icon + bare version $BASEVER)"
 STAGE_EXE="$APPDIR/wmux.exe" VER_BASE="$BASEVER" node -e "
