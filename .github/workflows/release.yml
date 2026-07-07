@@ -89,9 +89,15 @@ jobs:
           VER: ${{ steps.version.outputs.version }}
 
       # ── Sign exe with SignPath (runs only when secrets are set, #71) ──
+      # continue-on-error: a rejected submission (e.g. SignPath OSS yearly
+      # quota exceeded) must not block the release — we ship unsigned, as
+      # before, and signing resumes automatically once quota is available.
+      # The verify step below stays fatal: if a SIGNED artifact comes back
+      # invalid, the release fails rather than shipping it.
       - name: Submit exe to SignPath for Authenticode signing
         id: sign-submit
         if: env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_ORGANIZATION_ID != ''
+        continue-on-error: true
         shell: bash
         run: |
           HTTP_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
@@ -107,7 +113,7 @@ jobs:
           HTTP_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
           echo "HTTP status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "201" ]; then
-            echo "::error::SignPath submission failed (HTTP $HTTP_CODE)"
+            echo "::warning::SignPath submission failed (HTTP $HTTP_CODE) — releasing unsigned"
             echo "$HTTP_RESPONSE"
             exit 1
           fi
