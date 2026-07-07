@@ -1,2 +1,5 @@
 # Keep shell scripts LF so they run under bash even with core.autocrlf=true.
 *.sh text eol=lf
+# The extensionless wmux CLI shim is a bash script — force LF so its shebang
+# runs under bash even on Windows with core.autocrlf=true.
+src/cli-bin/wmux text eol=lf

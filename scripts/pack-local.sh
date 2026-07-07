@@ -55,6 +55,7 @@ cp -r resources/claude-instructions "$APPDIR/resources/claude-instructions"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions.md"
 cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
 mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
+mkdir -p "$APPDIR/resources/cli-bin"; cp -r src/cli-bin/. "$APPDIR/resources/cli-bin/"   # wmux/wmux.cmd shims — pty-manager prepends this dir to PATH so bare `wmux` works in agent shells
 cp installer/setup.ps1 "$APPDIR/setup.ps1"   # turnkey CLI-shim installer (see README "Additional Setup Required for Claude Orchestration")
 
 echo "-- [5/6] rcedit wmux.exe (icon + bare version $BASEVER)"
