@@ -158,6 +158,7 @@ export type ShortcutAction =
   | 'openSettings'
   | 'commandPalette'
   | 'openMarkdownPanel'
+  | 'openDiffPanel'
   // ─── issue #64: high-value additions ──────────────────────────────────────
   | 'reopenClosedSurface'
   | 'findNext'
@@ -213,6 +214,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, ShortcutBinding> = {
   openSettings:      { key: ',', ctrl: true },
   commandPalette:    { key: 'p', ctrl: true, shift: true },
   openMarkdownPanel: { key: 'm', ctrl: true, shift: true },
+  openDiffPanel:     { key: 'g', ctrl: true, shift: true },
   // ─── issue #64 ──────────────────────────────────────────────────────────────
   // Defaults collision-checked against the bindings above. All use Shift/Alt or
   // function keys, so isSafeToIntercept() forwards bare-Ctrl combos to the
