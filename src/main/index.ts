@@ -34,6 +34,9 @@ function routeSpecialV2(
     handleBrowserV2(request.method, request.params, respond, respondError);
     return true;
   }
+  if (request.method.startsWith('window.')) {
+    return handleWindowV2(request.method, request.params, respond, respondError);
+  }
   return handleBridgeV2(request.method, request.params, respond, respondError);
 }
 
@@ -82,6 +85,37 @@ const windowManager = new WindowManager();
 // methods below). Outbound is surface.send_text; this lets a recipient drain messages
 // left for it. In-memory for the app's lifetime.
 const a2aStore = new A2AStore();
+
+// window.* V2 methods (issue #78) run entirely in the main process against
+// windowManager — no renderer bridge involved. Returns true when handled so
+// the main dispatch switch can be skipped.
+function handleWindowV2(
+  method: string,
+  params: any,
+  respond: (result: any) => void,
+  respondError: (code: number, message: string) => void,
+): boolean {
+  switch (method) {
+    case 'window.create':
+      // Second OS window — lets users spread workspaces across monitors
+      // without a second wmux instance. Same code path as the Ctrl+Shift+N
+      // shortcut, just reachable from the CLI/agents.
+      respond({ windowId: windowManager.createWindow() });
+      return true;
+    case 'window.list':
+      respond({ windows: windowManager.listWindows() });
+      return true;
+    case 'window.focus': {
+      const id = params?.id || params?.windowId;
+      if (!id) { respondError(-32602, 'Missing window id'); return true; }
+      windowManager.focusWindow(id);
+      respond({ ok: true });
+      return true;
+    }
+    default:
+      return false;
+  }
+}
 // Per-instance secret that authenticates privileged (V2) pipe requests.
 // Generated/persisted once per APPDATA dir and injected into spawned shells
 // as WMUX_PIPE_TOKEN so the CLI and hooks can authenticate.
@@ -405,6 +439,7 @@ app.whenReady().then(() => {
         respond({ protocols: ['v1', 'v2'], features: ['workspaces', 'splits', 'notifications'] });
         break;
       // workspace.* and pane.split/close handled by handleBridgeV2 (./v2-bridge).
+      // window.* handled by handleWindowV2 above.
       case 'pane.focus': {
         // Focus the first surface in the specified pane
         (async () => {

@@ -403,10 +403,18 @@ resources/wmux-orchestrator/
 ```bash
 # System
 wmux ping | identify | capabilities
+wmux new-window | list-windows | focus-window <id>
 
 # Workspaces
-wmux new-workspace [--title T] [--shell S] [--cwd D]
+wmux new-workspace [--title T] [--shell S] [--cwd D]   # --shell accepts args: --shell "ssh user@host"
 wmux close-workspace | select-workspace | rename-workspace | list-workspaces
+wmux ssh [ssh options] <user@host> [--title T]         # remote terminal in a new workspace (issue #78)
+
+# Remote wmux management (issue #78): drive another machine's wmux over an SSH tunnel
+wmux bridge [--port P] [--host H]     # on the remote: expose its pipe on TCP (default 127.0.0.1:9787)
+wmux token                            # on the remote: print its auth token
+wmux --remote host[:port] --token T <any command>   # on the client (through `ssh -L port:127.0.0.1:port`)
+                                      # env equivalents: WMUX_REMOTE, WMUX_REMOTE_TOKEN
 
 # Surfaces (tabs within a pane)
 wmux new-surface [--type terminal|browser|markdown]
