@@ -89,6 +89,30 @@
   border-right: 1px solid var(--ui-bg-0);
   user-select: none;
   transition: background 0.1s ease, color 0.1s ease;
+  position: relative; /* anchor for the OSC 9;4 progress strip */
+}
+
+/* OSC 9;4 progress strip along the tab's bottom edge.
+   --s1 normal, --s2 error, --s3 indeterminate, --s4 paused/warning. */
+.surface-tab__progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: #0091ff;
+  pointer-events: none;
+  transition: width 0.2s ease;
+}
+.surface-tab__progress--s2 { background: #e53935; }
+.surface-tab__progress--s4 { background: #fb8c00; }
+.surface-tab__progress--s3 {
+  width: 100%;
+  background: repeating-linear-gradient(90deg, #0091ff 0 8px, transparent 8px 16px);
+  animation: surface-tab-progress-slide 1s linear infinite;
+}
+@keyframes surface-tab-progress-slide {
+  from { background-position-x: 0; }
+  to { background-position-x: 16px; }
 }
 .surface-tab:hover { background: var(--ui-bg-5); color: var(--ui-text-secondary); }
 .surface-tab--active { background: var(--ui-border); color: var(--ui-text-primary); }

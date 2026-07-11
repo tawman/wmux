@@ -198,5 +198,8 @@ contextBridge.exposeInMainWorld('wmux', {
     minimize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_MINIMIZE),
     maximize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_MAXIMIZE),
     isMaximized: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_MAXIMIZED),
+    // Windows taskbar progress (OSC 9;4 aggregate). value 0-1, or -1 to remove.
+    setProgress: (value: number, mode?: string) =>
+      ipcRenderer.send(IPC_CHANNELS.WINDOW_SET_PROGRESS, value, mode),
   },
 });

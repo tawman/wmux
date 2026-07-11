@@ -4,6 +4,7 @@ import { useStore } from './store';
 import { PaneId, SurfaceId, WorkspaceId, WorkspaceInfo, SplitNode } from '../shared/types';
 import SplitContainer from './components/SplitPane/SplitContainer';
 import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface } from './store/split-utils';
+import { aggregateProgress } from './store/progress-slice';
 import Sidebar from './components/Sidebar/Sidebar';
 import Titlebar from './components/Titlebar/Titlebar';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -198,6 +199,31 @@ function handleAgentLifecycleEvent(event: any, addNotification: StoreAction): vo
     text = wsTitle ? `Claude Code finished in ${wsTitle}` : 'Claude Code finished';
   }
   fireNotification(sid, wsId, text, addNotification);
+}
+
+/**
+ * --replace-tab agent spawn (PR #85): swap the pane's sole idle default
+ * terminal for the agent surface instead of appending, so orchestration panes
+ * don't keep an unused shell tab. Guards: exactly one surface, terminal type
+ * (enforced in replaceSoleTerminalSurface), and not itself an agent surface.
+ * Returns true when the spawn was handled via replacement.
+ */
+function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfaceId: any, meta: any) => void): boolean {
+  if (!event.replaceTab) return false;
+  const state = useStore.getState();
+  const leaf = findLeaf(ws.splitTree, event.paneId);
+  const sole = leaf?.surfaces.length === 1 ? leaf.surfaces[0] : undefined;
+  if (!sole || state.agentMeta.get(sole.id)) return false;
+  const { tree, replacedSurfaceId } = replaceSoleTerminalSurface(
+    ws.splitTree, event.paneId, { id: event.surfaceId, type: 'terminal' },
+  );
+  if (!replacedSurfaceId) return false;
+  state.updateSplitTree(event.workspaceId, tree);
+  setAgentMeta(event.surfaceId, { agentId: event.agentId, label: event.label, status: 'running' });
+  // Intentionally not pushed onto the reopen-closed stack — the replaced
+  // surface is an idle default shell, not user work.
+  window.wmux?.pty?.kill(replacedSurfaceId);
+  return true;
 }
 
 /** Build the default 3-terminal split layout for new workspaces */
@@ -416,27 +442,7 @@ export default function App() {
         const ws = state.workspaces.find((w) => w.id === workspaceId);
         if (!ws) return;
 
-        // --replace-tab: swap the pane's sole idle default terminal for the
-        // agent surface instead of appending, so orchestration panes don't
-        // keep an unused shell tab. Guards: exactly one surface, terminal
-        // type (enforced in the helper), and not itself an agent surface.
-        if (event.replaceTab) {
-          const leaf = findLeaf(ws.splitTree, paneId);
-          const sole = leaf?.surfaces.length === 1 ? leaf.surfaces[0] : undefined;
-          if (sole && !state.agentMeta.get(sole.id)) {
-            const { tree, replacedSurfaceId } = replaceSoleTerminalSurface(
-              ws.splitTree, paneId, { id: surfaceId, type: 'terminal' },
-            );
-            if (replacedSurfaceId) {
-              state.updateSplitTree(workspaceId, tree);
-              setAgentMeta(surfaceId, { agentId: event.agentId, label, status: 'running' });
-              // Intentionally not pushed onto the reopen-closed stack — the
-              // replaced surface is an idle default shell, not user work.
-              window.wmux?.pty?.kill(replacedSurfaceId);
-              return;
-            }
-          }
-        }
+        if (tryReplaceTabSpawn(event, ws, setAgentMeta)) return;
 
         const addSurfaceToLeaf = (node: SplitNode): SplitNode => {
           if (node.type === 'leaf' && node.paneId === paneId) {
@@ -553,6 +559,23 @@ export default function App() {
     });
     return unsub;
   }, []);
+
+  // ── Windows taskbar progress (OSC 9;4) ──────────────────────────────────
+  // Fold every surface's progress into one value for this window's taskbar
+  // button — the same convention Windows Terminal follows for the sequence.
+  const surfaceProgress = useStore((s) => s.surfaceProgress);
+  useEffect(() => {
+    const api = window.wmux?.window;
+    if (!api?.setProgress) return;
+    const agg = aggregateProgress(Object.values(surfaceProgress));
+    if (!agg) {
+      api.setProgress(-1, 'none');
+      return;
+    }
+    const MODES: Record<number, string> = { 1: 'normal', 2: 'error', 3: 'indeterminate', 4: 'paused' };
+    const value = agg.state === 3 ? 1 : Math.min(1, Math.max(0, agg.value / 100));
+    api.setProgress(value, MODES[agg.state]);
+  }, [surfaceProgress]);
 
   // Respond to main process auto-save requests (30s timer + on quit)
   useEffect(() => {

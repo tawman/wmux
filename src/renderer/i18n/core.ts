@@ -58,6 +58,9 @@ const en: Dict = {
   'titlebar.help': 'Help / Tutorial',
   'titlebar.devtools': 'Toggle Developer Tools',
   'titlebar.settings': 'Settings (Ctrl+,)',
+  // Titlebar — update badge (issue #88)
+  'titlebar.updateAvailable': 'Update available',
+  'titlebar.updateDownload': 'Click to download from GitHub',
   // Settings — Help / About panel
   'settings.tab.help': 'Help',
   'settings.help.about': 'About wmux',
@@ -78,6 +81,10 @@ const en: Dict = {
   'ctx.closeOthers': 'Close Other Workspaces',
   'ctx.markRead': 'Mark as Read',
   'ctx.markUnread': 'Mark as Unread',
+  'ctx.status': 'Status Indicator',
+  'ctx.statusAuto': 'Auto (detected)',
+  'ctx.statusRunning': 'Pin as Running',
+  'ctx.statusIdle': 'Pin as Idle',
 };
 
 const fr: Dict = {
@@ -112,6 +119,8 @@ const fr: Dict = {
   'titlebar.help': 'Aide / Tutoriel',
   'titlebar.devtools': 'Afficher/Masquer les outils de développement',
   'titlebar.settings': 'Paramètres (Ctrl+,)',
+  'titlebar.updateAvailable': 'Mise à jour disponible',
+  'titlebar.updateDownload': 'Clic pour télécharger sur GitHub',
   'settings.tab.help': 'Aide',
   'settings.help.about': 'À propos de wmux',
   'settings.help.version': 'Version',
@@ -130,6 +139,10 @@ const fr: Dict = {
   'ctx.closeOthers': 'Fermer les autres espaces',
   'ctx.markRead': 'Marquer comme lu',
   'ctx.markUnread': 'Marquer comme non lu',
+  'ctx.status': "Indicateur d'état",
+  'ctx.statusAuto': 'Auto (détecté)',
+  'ctx.statusRunning': 'Épingler « En cours »',
+  'ctx.statusIdle': 'Épingler « Inactif »',
 };
 
 const zh: Dict = {
@@ -162,6 +175,8 @@ const zh: Dict = {
   'titlebar.help': '帮助 / 教程',
   'titlebar.devtools': '切换开发者工具',
   'titlebar.settings': '设置 (Ctrl+,)',
+  'titlebar.updateAvailable': '有可用更新',
+  'titlebar.updateDownload': '点击前往 GitHub 下载',
   'settings.tab.help': '帮助',
   'settings.help.about': '关于 wmux',
   'settings.help.version': '版本',
@@ -180,6 +195,10 @@ const zh: Dict = {
   'ctx.closeOthers': '关闭其他工作区',
   'ctx.markRead': '标记为已读',
   'ctx.markUnread': '标记为未读',
+  'ctx.status': '状态指示',
+  'ctx.statusAuto': '自动（检测）',
+  'ctx.statusRunning': '固定为运行中',
+  'ctx.statusIdle': '固定为空闲',
 };
 
 const DICTS: Record<Language, Dict> = { en, fr, zh };

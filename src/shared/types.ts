@@ -71,6 +71,10 @@ export interface WorkspaceInfo {
   ports?: number[];
   notificationText?: string;
   shellState?: 'idle' | 'running' | 'interrupted';
+  // Manual pin of the sidebar status indicator (issue #81). When set it wins
+  // over all detection (shell integration, Claude observer/hooks); cleared
+  // (undefined) means automatic.
+  statusOverride?: 'running' | 'idle';
   browserUrl?: string;
   browserWidth?: number;
 }
@@ -270,6 +274,7 @@ export const IPC_CHANNELS = {
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_IS_MAXIMIZED: 'window:isMaximized',
+  WINDOW_SET_PROGRESS: 'window:setProgress',
   // Config
   CONFIG_GET_THEME: 'config:getTheme',
   CONFIG_GET_THEME_LIST: 'config:getThemeList',

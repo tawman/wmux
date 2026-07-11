@@ -90,6 +90,7 @@ export default function SurfaceTabBar({
   const agentMeta = useStore((state) => state.agentMeta);
   const activeWorkspaceId = useStore((state) => state.activeWorkspaceId);
   const renameSurface = useStore((state) => state.renameSurface);
+  const surfaceProgress = useStore((state) => state.surfaceProgress);
   const getAgentMeta = (surfaceId: string) => agentMeta.get(surfaceId as any);
 
   // Live binding labels for control tooltips (issue #64): read from the store so
@@ -271,6 +272,7 @@ export default function SurfaceTabBar({
           const agentMeta = getAgentMeta(surface.id);
           const isAgent = !!agentMeta;
           const isRenaming = renamingId === surface.id;
+          const progress = surfaceProgress[surface.id];
           return (
             <div
               key={surface.id}
@@ -346,6 +348,12 @@ export default function SurfaceTabBar({
                 >
                   ×
                 </button>
+              )}
+              {progress && (
+                <span
+                  className={`surface-tab__progress surface-tab__progress--s${progress.state}`}
+                  style={progress.state === 3 ? undefined : { width: `${progress.value}%` }}
+                />
               )}
             </div>
           );
