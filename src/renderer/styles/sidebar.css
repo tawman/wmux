@@ -613,6 +613,45 @@
   background: rgba(var(--ui-overlay-rgb), 0.06);
 }
 
+/* ─── OSC 9;4 workspace progress bar ─────────────────────────────────── */
+.workspace-row__progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 8px 0 20px;
+}
+.workspace-row__progress-track {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(var(--ui-overlay-rgb), 0.12);
+  overflow: hidden;
+}
+.workspace-row__progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #0091ff;
+  transition: width 0.2s ease;
+}
+.workspace-row__progress-fill--s2 { background: #e53935; }
+.workspace-row__progress-fill--s4 { background: #fb8c00; }
+.workspace-row__progress-fill--s3 {
+  width: 100%;
+  background: repeating-linear-gradient(90deg, #0091ff 0 8px, transparent 8px 16px);
+  animation: workspace-row-progress-slide 1s linear infinite;
+}
+@keyframes workspace-row-progress-slide {
+  from { background-position-x: 0; }
+  to { background-position-x: 16px; }
+}
+.workspace-row__progress-pct {
+  font-size: 10px;
+  min-width: 28px;
+  text-align: right;
+  color: rgba(var(--ui-overlay-rgb), 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
 .sidebar__save-input {
   flex: 1;
   background: rgba(var(--ui-overlay-rgb), 0.08);

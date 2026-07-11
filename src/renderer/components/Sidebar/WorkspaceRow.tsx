@@ -1,5 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { WorkspaceInfo, SplitNode } from '../../../shared/types';
+import { useStore } from '../../store';
+import { aggregateProgress } from '../../store/progress-slice';
 import UnreadBadge from './UnreadBadge';
 import PrStatusIcon from './PrStatusIcon';
 
@@ -97,6 +99,14 @@ export default function WorkspaceRow({
     const timer = setInterval(() => setTick(t => t + 1), 2000);
     return () => clearInterval(timer);
   }, []);
+
+  // OSC 9;4 progress from this workspace's terminals, folded into one bar.
+  const surfaceProgress = useStore((state) => state.surfaceProgress);
+  const wsProgress = useMemo(() => {
+    const ids = getAllSurfaceIds(workspace.splitTree);
+    const entries = ids.map((id) => surfaceProgress[id]).filter(Boolean);
+    return aggregateProgress(entries);
+  }, [surfaceProgress, workspace.splitTree]);
 
   // Find Claude activity for this workspace's surfaces (from PTY observer)
   const wsActivity = useMemo(() => {
@@ -313,6 +323,23 @@ export default function WorkspaceRow({
       <div className={`workspace-row__status ${statusClass}`}>
         {statusText}
       </div>
+
+      {/* OSC 9;4 progress bar — only while a terminal reports progress */}
+      {wsProgress && (
+        <div className="workspace-row__progress" title={
+          wsProgress.state === 3 ? 'Working…' : `${wsProgress.value}%`
+        }>
+          <div className="workspace-row__progress-track">
+            <div
+              className={`workspace-row__progress-fill workspace-row__progress-fill--s${wsProgress.state}`}
+              style={wsProgress.state === 3 ? undefined : { width: `${wsProgress.value}%` }}
+            />
+          </div>
+          {wsProgress.state !== 3 && (
+            <span className="workspace-row__progress-pct">{wsProgress.value}%</span>
+          )}
+        </div>
+      )}
 
       {/* PR info */}
       {workspace.prNumber != null && (

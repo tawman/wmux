@@ -6,6 +6,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { ImageAddon } from '@xterm/addon-image';
 import { SerializeAddon } from '@xterm/addon-serialize';
+import { ProgressAddon } from '@xterm/addon-progress';
 import { useStore } from '../store';
 import { collectActiveTerminalSurfaceIds } from '../store/split-utils';
 import { SplitNode, ThemeConfig } from '../../shared/types';
@@ -390,6 +391,18 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     terminal.loadAddon(serializeAddon);
     terminal.unicode.activeVersion = '11';
 
+    // OSC 9;4 progress (ConEmu/Windows Terminal convention) → store, keyed by
+    // surface. Surfaced on the tab, the sidebar workspace row, and the Windows
+    // taskbar. State 0 (remove) deletes the entry rather than storing it.
+    const progressAddon = new ProgressAddon();
+    terminal.loadAddon(progressAddon);
+    progressAddon.onChange(({ state, value }) => {
+      if (disposed || !surfaceId) return;
+      const setSurfaceProgress = useStore.getState().setSurfaceProgress;
+      if (state === 0) setSurfaceProgress(surfaceId, null);
+      else setSurfaceProgress(surfaceId, { state: state as 1 | 2 | 3 | 4, value });
+    });
+
     // Suppress xterm's automatic Primary Device Attributes (DA1) reply — the
     // main process answers DA1 instead (see DA1_QUERY in pty-manager.ts).
     //
@@ -675,6 +688,9 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       const unsubExit = window.wmux.pty.onExit(id, (_code: number) => {
         terminal.writeln('\r\n\x1b[2m[process exited]\x1b[0m');
         clearStuckRunningState(id);
+        // An exited process can't be making progress — drop any leftover
+        // OSC 9;4 indicator (same stuck-badge reasoning as above).
+        useStore.getState().setSurfaceProgress(id, null);
       });
 
       cleanupFnsRef.current.push(unsubData, unsubExit);
@@ -844,6 +860,13 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       // replacement instance under the same surfaceId).
       if (surfaceId && surfaceTerminalRegistry.get(surfaceId) === terminal) {
         surfaceTerminalRegistry.delete(surfaceId);
+      }
+
+      // Drop any progress indicator. A remount loses the addon's parser state
+      // (buffer replay doesn't re-emit OSC 9;4), so keeping the entry would
+      // strand a stale bar; the app re-reports on its next progress write.
+      if (surfaceId) {
+        useStore.getState().setSurfaceProgress(surfaceId, null);
       }
 
       // Release the GPU renderer (and its WebGL budget slot) before disposing

@@ -274,6 +274,7 @@ export const IPC_CHANNELS = {
   WINDOW_MINIMIZE: 'window:minimize',
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_IS_MAXIMIZED: 'window:isMaximized',
+  WINDOW_SET_PROGRESS: 'window:setProgress',
   // Config
   CONFIG_GET_THEME: 'config:getTheme',
   CONFIG_GET_THEME_LIST: 'config:getThemeList',

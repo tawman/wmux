@@ -196,6 +196,15 @@ export function registerIpcHandlers(windowManager: WindowManager, cdpProxyInstan
   ipcMain.handle(IPC_CHANNELS.WINDOW_IS_MAXIMIZED, (e) =>
     BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false
   );
+  // Taskbar progress: renderer sends its OSC 9;4 aggregate for this window.
+  ipcMain.on(IPC_CHANNELS.WINDOW_SET_PROGRESS, (e, value: number, mode?: string) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+    const validModes = ['none', 'normal', 'indeterminate', 'error', 'paused'];
+    const safeMode = (validModes.includes(mode ?? '') ? mode : 'normal') as
+      'none' | 'normal' | 'indeterminate' | 'error' | 'paused';
+    win.setProgressBar(typeof value === 'number' ? value : -1, { mode: safeMode });
+  });
 
   ipcMain.on(
     IPC_CHANNELS.CDP_ATTACH,
