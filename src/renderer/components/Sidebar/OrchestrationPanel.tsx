@@ -21,6 +21,10 @@ export default function OrchestrationPanel() {
   }, [orch?.status, orch?.id]);
 
   if (!orch) return null;
+  // Defence in depth: the watcher already rejects malformed state.json, but a
+  // run with no `id`/`waves` must never reach the render body — throwing here
+  // unmounts the whole app (see ErrorBoundary).
+  if (typeof orch.id !== 'string' || !Array.isArray(orch.waves)) return null;
 
   const elapsedMs = Math.max(0, now - parseIso(orch.startedAt));
   const elapsed = formatElapsed(elapsedMs);
