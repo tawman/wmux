@@ -26,8 +26,13 @@ export default function OrchestrationPanel() {
   // unmounts the whole app (see ErrorBoundary).
   if (typeof orch.id !== 'string' || !Array.isArray(orch.waves)) return null;
 
-  const elapsedMs = Math.max(0, now - parseIso(orch.startedAt));
-  const elapsed = formatElapsed(elapsedMs);
+  // parseIso returns 0 for a missing/unparseable startedAt, and `now - 0` is the
+  // whole Unix epoch — the panel rendered "495520:02:09" for a run that had been
+  // going ten minutes. An unknown start time is not a 56-year-old run: show that
+  // we don't know it. (The plugin's schema is `startedAt`; runs that write some
+  // other key land here.)
+  const startedMs = parseIso(orch.startedAt);
+  const elapsed = startedMs > 0 ? formatElapsed(Math.max(0, now - startedMs)) : '—';
   const currentWaveIdx = findCurrentWaveIndex(orch);
   const totalAgents = orch.waves.reduce((sum, w) => sum + w.agents.length, 0);
   const runningAgents = countByStatus(orch, 'running');
