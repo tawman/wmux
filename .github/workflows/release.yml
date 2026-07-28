@@ -41,6 +41,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ── Gate ───────────────────────────────────────────────
+      # A tag push used to go straight from `npm ci` to a published release with
+      # no test or typecheck run anywhere in between. 0.35.0 shipped a renderer
+      # that threw on first paint for every user (a TDZ read in a useMemo deps
+      # array, which `tsc` reports as TS2448 in under two seconds) because
+      # nothing here ever asked. Failing the release is the point: a tag that
+      # cannot pass its own tests must not become a download.
+      - name: Test
+        run: npm test
+
       # ── Build ──────────────────────────────────────────────
       - name: Build main + preload + CLI
         run: npm run build:main
@@ -48,9 +58,15 @@ jobs:
       - name: Build renderer
         run: npx vite build
 
-      # ── Package (unpacked directory, no installer) ─────────
+      # ── Package (NSIS installer) ───────────────────────────
+      # Build the NSIS installer so electron-updater can actually install the
+      # update on Windows. The previous `--dir` build shipped a zip, which
+      # electron-updater's NsisUpdater can download and verify but has no way to
+      # install — quitAndInstall() no-ops and the app relaunches unchanged
+      # (issue #96). --publish never: we upload manually below so latest.yml is
+      # generated AFTER signing (see the note on that step).
       - name: Package with electron-builder
-        run: npx electron-builder --win --dir --publish never
+        run: npx electron-builder --win --publish never
 
       - name: Extract version
         id: version
@@ -66,31 +82,12 @@ jobs:
             echo "tag=v$VER" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Embed icon + metadata into exe (rcedit) ───────────
-      # NOTE: rcedit rewrites the PE and would invalidate an Authenticode
-      # signature, so it must run BEFORE the SignPath steps below.
-      - name: Embed icon and version metadata
-        shell: bash
-        run: |
-          VER=$(node -p "require('./package.json').version")
-          node -e "
-            const { rcedit } = require('rcedit');
-            rcedit('release/win-unpacked/wmux.exe', {
-              icon: 'resources/icons/icon.ico',
-              'version-string': {
-                ProductName: 'wmux',
-                FileDescription: 'wmux',
-                CompanyName: 'wmux',
-                InternalName: 'wmux',
-                OriginalFilename: 'wmux.exe',
-                LegalCopyright: 'Copyright (c) 2025 wmux'
-              },
-              'file-version': process.env.VER,
-              'product-version': process.env.VER
-            }).then(() => console.log('rcedit done')).catch(e => { console.error(e); process.exit(1); });
-          "
-        env:
-          VER: ${{ steps.version.outputs.version }}
+      # ── Icon + version metadata ────────────────────────────
+      # electron-builder embeds win.icon and the package.json version into the
+      # packaged exe during the NSIS build above, so the previous manual rcedit
+      # pass is no longer needed — it targeted release/win-unpacked/wmux.exe,
+      # which is already baked into the installer by the time a separate step
+      # could run, so it had no effect on the shipped artifact.
 
       # ── Sign exe with SignPath (runs only when secrets are set, #71) ──
       # continue-on-error: a rejected submission (e.g. SignPath OSS yearly
@@ -111,7 +108,7 @@ jobs:
             -F "signingPolicySlug=wmux" \
             -F "artifactConfigurationSlug=initial" \
             -F "description=CI release v${{ steps.version.outputs.version }}" \
-            -F "artifact=@release/win-unpacked/wmux.exe" \
+            -F "artifact=@release/wmux-${{ steps.version.outputs.version }}-setup.exe" \
             -D headers.txt \
             "https://app.signpath.io/api/v1/$SIGNPATH_ORGANIZATION_ID/SigningRequests/SubmitWithArtifact")
           HTTP_CODE=$(echo "$HTTP_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
@@ -150,29 +147,68 @@ jobs:
           exit 1
 
       - name: Download signed exe and verify signature
+        id: sign-verify
         if: steps.sign-submit.outcome == 'success' && steps.sign-submit.outputs.signing_request_id != ''
         shell: bash
         run: |
           curl -s \
             -H "Authorization: Bearer $SIGNPATH_API_TOKEN" \
-            -o "release/win-unpacked/wmux.exe" \
+            -o "release/wmux-${{ steps.version.outputs.version }}-setup.exe" \
             "https://app.signpath.io/api/v1/$SIGNPATH_ORGANIZATION_ID/SigningRequests/${{ steps.sign-submit.outputs.signing_request_id }}/SignedArtifact"
-          echo "Signed exe downloaded, size: $(wc -c < release/win-unpacked/wmux.exe) bytes"
-          # Fail the release if the artifact we are about to ship is not validly signed.
+          echo "Signed installer downloaded, size: $(wc -c < release/wmux-${{ steps.version.outputs.version }}-setup.exe) bytes"
+          # trusted=true only for a chain-valid Authenticode signature. A
+          # SignPath project can also sign with a SELF-SIGNED certificate
+          # (e.g. while the OSS "SignPath Foundation" cert is unavailable,
+          # issue #71): Get-AuthenticodeSignature then reports UnknownError
+          # (untrusted root). That artifact is fine to ship for manual
+          # download, but it must NOT be advertised to the auto-updater —
+          # electron-updater requires a Valid signature on the user's machine,
+          # so a self-signed installer downloads and then fails to install,
+          # which is exactly the endless-update loop of issue #96.
           powershell -NoProfile -Command "
-            \$sig = Get-AuthenticodeSignature 'release/win-unpacked/wmux.exe';
-            Write-Host ('Status: ' + \$sig.Status + ' — Subject: ' + \$sig.SignerCertificate.Subject);
-            if (\$sig.Status -ne 'Valid') { exit 1 }
+            \$sig = Get-AuthenticodeSignature 'release/wmux-${{ steps.version.outputs.version }}-setup.exe';
+            \$subject = if (\$sig.SignerCertificate) { \$sig.SignerCertificate.Subject } else { '(none)' };
+            Write-Host ('Status: ' + \$sig.Status + ' — Subject: ' + \$subject);
+            \$trusted = if (\$sig.Status -eq 'Valid') { 'true' } else { 'false' };
+            Add-Content -Path \$env:GITHUB_OUTPUT -Value ('trusted=' + \$trusted);
+            if (\$trusted -eq 'false') {
+              Write-Host '::warning::Installer signature is not chain-trusted (self-signed cert?). Shipping anyway — clients no longer pin publisherName, so auto-update still works (integrity via latest.yml sha512).'
+            }
           "
 
-      # ── Create release zip ─────────────────────────────────
-      - name: Create release zip
+      # ── Portable zip ───────────────────────────────────────
+      # Keep shipping the portable zip alongside the NSIS installer: the docs
+      # and wmux.org tell users to grab wmux-X.Y.Z-win-x64.zip, and unsigned
+      # zips trip SmartScreen far less than unsigned installers. The NSIS build
+      # above still emits release/win-unpacked/ as an intermediate, so this is
+      # free. Auto-update (latest.yml) points at the installer, not this zip —
+      # a zip can be downloaded but never installed by NsisUpdater (issue #96).
+      - name: Create portable zip
         shell: pwsh
         run: |
           Compress-Archive -Path "release/win-unpacked/*" `
             -DestinationPath "wmux-${{ steps.version.outputs.version }}-win-x64.zip"
 
       # ── Generate latest.yml for electron-updater ──────────
+      # ALWAYS published. The `win.publisherName` pin was removed from
+      # electron-builder.json: with no pin, NsisUpdater skips Authenticode
+      # verification, so unsigned/self-signed installers install fine —
+      # integrity comes from the sha512 below, and the client-side quarantine
+      # window + explicit install dialog (updater.ts) remain the safety net.
+      # History: while the pin existed, latest.yml was gated on a chain-trusted
+      # signature; since SignPath fell back to a self-signed cert, that gate
+      # silently stranded every install on its current version (no latest.yml
+      # → 404 → no update ever). If chain-trusted signing returns, re-add the
+      # pin AND re-gate this step together.
+      # Installs ≤0.31 still carry the pin in their local app-update.yml and
+      # will fail verification silently; the notify-only checker
+      # (update-checker.ts) tells those users to update manually once.
+      #
+      # MUST run last, AFTER signing: SignPath rewrites the installer PE, so a
+      # hash computed earlier would not match the shipped file. Points at the
+      # NSIS installer (a zip can be downloaded but never installed — issue
+      # #96). No blockmap is emitted, so electron-updater does a full
+      # (non-differential) download verified by the top-level sha512.
       - name: Generate latest.yml
         shell: bash
         run: |
@@ -180,24 +216,24 @@ jobs:
             const crypto = require('crypto');
             const fs = require('fs');
             const version = '${{ steps.version.outputs.version }}';
-            const zip = 'wmux-' + version + '-win-x64.zip';
-            const data = fs.readFileSync(zip);
+            const installer = 'wmux-' + version + '-setup.exe';
+            const data = fs.readFileSync('release/' + installer);
             const sha512 = crypto.createHash('sha512').update(data).digest('base64');
             const size = data.length;
             const date = new Date().toISOString();
             const yaml = [
               'version: ' + version,
               'files:',
-              '  - url: ' + zip,
+              '  - url: ' + installer,
               '    sha512: ' + sha512,
               '    size: ' + size,
-              'path: ' + zip,
+              'path: ' + installer,
               'sha512: ' + sha512,
               \"releaseDate: '\" + date + \"'\",
               ''
             ].join('\n');
             fs.writeFileSync('latest.yml', yaml);
-            console.log('latest.yml generated for', zip, 'size=' + size, 'sha512=' + sha512.substring(0, 20) + '...');
+            console.log('latest.yml generated for', installer, 'size=' + size, 'sha512=' + sha512.substring(0, 20) + '...');
           "
 
       - name: Upload release artifacts as workflow artifacts
@@ -205,6 +241,7 @@ jobs:
         with:
           name: wmux-release
           path: |
+            release/wmux-${{ steps.version.outputs.version }}-setup.exe
             wmux-${{ steps.version.outputs.version }}-win-x64.zip
             latest.yml
 
@@ -215,6 +252,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: wmux ${{ steps.version.outputs.tag }}
           files: |
+            release/wmux-${{ steps.version.outputs.version }}-setup.exe
             wmux-${{ steps.version.outputs.version }}-win-x64.zip
             latest.yml
           draft: false

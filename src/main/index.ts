@@ -5,20 +5,22 @@ import { handleBridgeV2 } from './v2-bridge';
 import { distributeAgents } from './agent-manager';
 import { PipeServer } from './pipe-server';
 import { PortScanner } from './port-scanner';
-import { GitPoller } from './git-poller';
-import { PrPoller } from './pr-poller';
 import { CDPProxy } from './cdp-proxy';
 import { IPC_CHANNELS, SurfaceId } from '../shared/types';
 import { getPipePath, getAppDataDir, ensurePipeToken } from '../shared/instance';
 import { loadSession, saveSession, handleVersionChange, SessionData } from './session-persistence';
+import { sessionWindows, MAX_RESTORED_WINDOWS } from './session-windows';
 import { WindowManager } from './window-manager';
-import { initAutoUpdater } from './updater';
+import { initAutoUpdater, requestUpdateNow, getUpdateState } from './updater';
 import { initUpdateChecker, getLatestUpdate } from './update-checker';
 import { ensureClaudeContext, ensureClaudeHooks, ensureChromeDevtoolsConfig, ensureOrchestratorPlugin } from './claude-context';
 import { ensureOpencodeContext, ensureOpencodePlugin } from './opencode-context';
-import { applyExternalActivity } from './claude-observer';
+import { applyExternalActivity, markSubagentStop, markAllAgentsDone } from './claude-observer';
 import { startOrchestrationWatcher } from './orchestration-watcher';
 import { A2AStore } from './a2a-store';
+import { readMarkdownFile } from './markdown-file';
+import { grantMarkdownPath, clearMarkdownGrants } from './markdown-grants';
+import { directoryFromArgv } from './shell-context-menu';
 import fs from 'fs';
 import path from 'path';
 
@@ -86,6 +88,32 @@ const windowManager = new WindowManager();
 // left for it. In-memory for the app's lifetime.
 const a2aStore = new A2AStore();
 
+// Closing a window should forget its saved workspaces — otherwise the merged
+// session file keeps them and they reappear as a ghost window next launch
+// (issue #118). Two cases deliberately do NOT prune: shutdown, and closing the
+// *last* window, which is how most people quit wmux and must still persist
+// everything for the next launch.
+windowManager.onWindowClosed = (id, webContentsId) => {
+  clearMarkdownGrants(webContentsId);
+  if (isQuitting || windowManager.getCount() === 0) return;
+  sessionWindows.forget(id);
+  saveSession({ version: 1, windows: sessionWindows.toArray() });
+};
+
+// Agent exit → renderer. Without this broadcast, sidebar agent lines would
+// pulse "running" forever: agentMeta is only written at spawn, and the old
+// 3s agent.list poll that used to sync statuses is gone. Mirrors the
+// 'spawned' AGENT_UPDATE emissions above.
+agentManager.setOnAgentExit((info) => {
+  BrowserWindow.getAllWindows().forEach((w) => {
+    if (!w.isDestroyed()) {
+      w.webContents.send(IPC_CHANNELS.AGENT_UPDATE, {
+        type: 'exited', surfaceId: info.surfaceId, exitCode: info.exitCode,
+      });
+    }
+  });
+});
+
 // window.* V2 methods (issue #78) run entirely in the main process against
 // windowManager — no renderer bridge involved. Returns true when handled so
 // the main dispatch switch can be skipped.
@@ -123,8 +151,6 @@ const pipeToken = ensurePipeToken();
 process.env.WMUX_PIPE_TOKEN = pipeToken;
 const pipeServer = new PipeServer(getPipePath(), pipeToken);
 const portScanner = new PortScanner();
-const gitPoller = new GitPoller();
-const prPoller = new PrPoller();
 const cdpProxy = new CDPProxy();
 
 // Strip MOTW (Mark of the Web) Zone.Identifier ADS from app directory.
@@ -150,6 +176,10 @@ function stripMotw(): void {
 
 // Auto-save debounce handle
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+// Set on before-quit so the final round of session:save replies is merged
+// instead of pruned — during shutdown every window is being destroyed, and
+// "forget windows that no longer exist" would erase the whole file (issue #118).
+let isQuitting = false;
 const AUTO_SAVE_INTERVAL_MS = 30_000;
 
 function scheduleAutoSave(): void {
@@ -254,15 +284,46 @@ if (process.env.WMUX_INSTANCE?.trim()) {
   app.setPath('userData', getAppDataDir());
 }
 const gotInstanceLock = app.requestSingleInstanceLock();
+
+/**
+ * Open a folder as a new workspace, for the Explorer context-menu verb
+ * ("Open in wmux" — see shell-context-menu.ts, which registers
+ * `"wmux.exe" "%V"`).
+ *
+ * Routed through the same `__wmux_createWorkspace` bridge the CLI's
+ * `new-workspace --cwd` uses, so Explorer, the CLI and the UI all land on one
+ * store action rather than a fourth way to make a workspace.
+ */
+async function openDirectoryAsWorkspace(dirPath: string): Promise<void> {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win || win.isDestroyed()) return;
+  try {
+    await win.webContents.executeJavaScript(
+      `window.__wmux_createWorkspace?.(${JSON.stringify({ title: path.basename(dirPath) || dirPath, cwd: dirPath })})`,
+    );
+  } catch {
+    // Renderer not ready or bridge missing — the window is still up, which is
+    // better than failing the launch outright.
+  }
+}
+
+const isDirectory = (p: string): boolean => fs.statSync(p).isDirectory();
+
 if (!gotInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  // Explorer launches `wmux.exe "C:\folder"`. With the single-instance lock held
+  // that becomes a second-instance event on the RUNNING window, carrying the new
+  // process's argv — so the folder has to be read from the event, not from our
+  // own process.argv, which still holds the original launch.
+  app.on('second-instance', (_event, argv) => {
     const win = BrowserWindow.getAllWindows()[0];
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
       win.focus();
     }
+    const dir = directoryFromArgv(argv, isDirectory);
+    if (dir) void openDirectoryAsWorkspace(dir);
   });
 }
 
@@ -312,6 +373,16 @@ function hardenWebContents(): void {
   });
 }
 
+// Lifecycle truth for sidebar agent lines: hooks, not output parsing, decide
+// when agents are finished (spec 2026-07-22, issue #81 class). SubagentStop
+// marks a single parallel subagent done; Stop marks the whole surface done.
+function applyHookLifecycle(params: any): void {
+  const sid = params?.surfaceId as SurfaceId | undefined;
+  if (!sid) return;
+  if (params.event === 'SubagentStop') markSubagentStop(sid);
+  else if (params.event === 'Stop') markAllAgentsDone(sid);
+}
+
 app.whenReady().then(() => {
   // A losing second instance is already quitting; don't run startup side effects.
   if (!gotInstanceLock) return;
@@ -324,17 +395,37 @@ app.whenReady().then(() => {
   ensureOpencodeContext();
   ensureOpencodePlugin();
 
-  // IPC: renderer pushes session state (auto-save response or explicit save)
+  // IPC: renderer pushes session state (auto-save response or explicit save).
+  // Every window answers the same broadcast, each with a one-entry `windows`
+  // array describing itself. Merging them through the registry is what stops
+  // the last responder from overwriting every other window's workspaces —
+  // before this, a second window silently cost you the first one's tabs and
+  // browser pages on the next 30s tick (issue #118).
   ipcMain.on('session:save', (event, data: SessionData) => {
-    // Augment with actual window bounds (renderer can't know these)
+    const state = data?.windows?.[0];
+    if (!state) return;
     const win = BrowserWindow.fromWebContents(event.sender);
-    if (win && !win.isDestroyed() && data.windows?.[0]) {
+    if (win && !win.isDestroyed()) {
       // Persist the maximized flag and the *normal* (pre-maximize) rectangle so a
       // relaunch can re-maximize on the right monitor and un-maximize sanely (issue #57).
-      data.windows[0].maximized = win.isMaximized();
-      data.windows[0].bounds = win.getNormalBounds();
+      state.maximized = win.isMaximized();
+      state.bounds = win.getNormalBounds();
     }
-    saveSession(data);
+
+    const windowId = windowManager.idForWebContents(event.sender);
+    if (windowId) {
+      sessionWindows.update(windowId, state);
+      // Forget windows the user closed — but never while quitting, when every
+      // window is being torn down and pruning would erase what we're saving.
+      if (!isQuitting) {
+        sessionWindows.retainOnly(windowManager.getAllWindows().map((w) => w.id));
+      }
+      saveSession({ version: 1, windows: sessionWindows.toArray() });
+    } else {
+      // Unattributable sender (a window created outside WindowManager). Better
+      // to persist its state alone than to drop the save entirely.
+      saveSession({ version: 1, windows: [state] });
+    }
     scheduleAutoSave();
   });
 
@@ -343,10 +434,34 @@ app.whenReady().then(() => {
   // Clear stale session data on version change (clean start for upgrades/fresh installs)
   handleVersionChange(app.getVersion());
 
-  // Attempt to restore last saved window bounds
+  // Reopen every window the last session had, not just the first (issue #118).
+  // Each gets its own slot in the registry so its renderer restores its own
+  // workspaces — `SESSION_LOAD_AUTO` used to hand windows[0] to whoever asked,
+  // which made a second window a clone of the first.
   const savedSession = loadSession();
-  const savedWindow = savedSession?.windows?.[0];
-  windowManager.createWindow(savedWindow?.bounds, savedWindow?.maximized);
+  const savedWindows = (savedSession?.windows ?? []).slice(0, MAX_RESTORED_WINDOWS);
+  if (savedWindows.length === 0) {
+    windowManager.createWindow();
+  } else {
+    for (const saved of savedWindows) {
+      const id = windowManager.createWindow(saved.bounds, saved.maximized);
+      sessionWindows.prime(id, saved);
+    }
+  }
+
+  // Cold launch from the Explorer verb: no instance was running, so there is no
+  // second-instance event — the folder is in our own argv. Wait for the renderer
+  // to finish loading, otherwise the __wmux_* bridge is not defined yet and the
+  // folder is silently dropped.
+  const launchDir = directoryFromArgv(process.argv, isDirectory);
+  if (launchDir) {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win && !win.isDestroyed()) {
+      win.webContents.once('did-finish-load', () => {
+        void openDirectoryAsWorkspace(launchDir);
+      });
+    }
+  }
 
   // Initialize auto-updater only when packaged (avoids errors in dev)
   if (app.isPackaged) {
@@ -357,6 +472,10 @@ app.whenReady().then(() => {
   // Late-mounted windows query the cached latest update info so the badge
   // appears even if the GitHub poll fired before the window's renderer attached.
   ipcMain.handle(IPC_CHANNELS.UPDATE_GET_LATEST, () => getLatestUpdate());
+  // Badge click — download + install in place; the renderer falls back to the
+  // release page when this says it can't (issue #125).
+  ipcMain.handle(IPC_CHANNELS.UPDATE_INSTALL, () => requestUpdateNow());
+  ipcMain.handle(IPC_CHANNELS.UPDATE_GET_STATE, () => getUpdateState());
   ipcMain.on(IPC_CHANNELS.UPDATE_OPEN_RELEASE, (_event, url: string) => {
     // Whitelist GitHub release URLs so a hostile renderer can't pivot this
     // channel into an arbitrary openExternal sink.
@@ -387,32 +506,6 @@ app.whenReady().then(() => {
     });
   });
 
-  gitPoller.onUpdate((cwd, state) => {
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send(IPC_CHANNELS.METADATA_UPDATE, {
-          command: state.branch ? 'report_git_branch' : 'clear_git_branch',
-          surfaceId: '', // will be mapped via cwd → workspace
-          args: state.branch ? [state.branch, state.dirty ? 'dirty' : ''] : [],
-        });
-      }
-    });
-  });
-
-  prPoller.onUpdate((cwd, pr) => {
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        if (pr) {
-          win.webContents.send(IPC_CHANNELS.METADATA_UPDATE, {
-            command: 'report_pr',
-            surfaceId: '',
-            args: [String(pr.number), pr.state, pr.title],
-          });
-        }
-      }
-    });
-  });
-
   pipeServer.on('v1', (cmd) => {
     // Trigger port scan when requested from shell integration
     if (cmd.command === 'ports_kick') {
@@ -433,7 +526,7 @@ app.whenReady().then(() => {
 
     switch (request.method) {
       case 'system.identify':
-        respond({ name: 'wmux', version: '0.5.0', platform: 'win32' });
+        respond({ name: 'wmux', version: app.getVersion(), platform: 'win32' });
         break;
       case 'system.capabilities':
         respond({ protocols: ['v1', 'v2'], features: ['workspaces', 'splits', 'notifications'] });
@@ -651,31 +744,35 @@ app.whenReady().then(() => {
       case 'markdown.load_file': {
         (async () => {
           try {
-            const filePath = request.params?.filePath || request.params?.path || request.params?.file;
-            if (!filePath) { respondError(-32000, 'No file path provided'); return; }
+            const requested = request.params?.filePath || request.params?.path || request.params?.file;
+            if (!requested) { respondError(-32000, 'No file path provided'); return; }
             // Defense-in-depth: even with a valid pipe token, only render plain
             // text/markdown files and cap the size, so this can't be used to
-            // slurp secrets (e.g. id_rsa, .env) into the markdown viewer.
-            const ALLOWED_MD_EXT = new Set(['.md', '.markdown', '.mdx', '.txt', '.text', '.rst']);
-            const ext = path.extname(filePath).toLowerCase();
-            if (!ALLOWED_MD_EXT.has(ext)) {
-              respondError(-32602, `Unsupported file type for markdown.load_file: ${ext || '(none)'}`);
+            // slurp secrets (e.g. id_rsa, .env) into the markdown viewer. The
+            // guards live in ./markdown-file so every entry point shares them.
+            //
+            // Normalize to an absolute path before handing it to the renderer:
+            // a path-aware surface (issue #116) has to show and reload something
+            // unambiguous. The CLI already resolves against the caller's cwd
+            // (src/cli/wmux.ts), so this only normalizes; a raw pipe client that
+            // sends a relative path gets the same main-cwd resolution fs would
+            // have applied anyway, just made explicit and visible in the pane.
+            const filePath = path.resolve(requested);
+            const read = readMarkdownFile(filePath);
+            if ('error' in read) {
+              respondError(-32602, `markdown.load_file: ${read.error}`);
               return;
             }
-            let stat: fs.Stats;
-            try { stat = fs.statSync(filePath); } catch { respondError(-32000, 'File not found'); return; }
-            const MAX_MD_BYTES = 5 * 1024 * 1024;
-            if (!stat.isFile() || stat.size > MAX_MD_BYTES) {
-              respondError(-32602, 'File is not a regular file or exceeds 5MB limit');
-              return;
-            }
-            const content = fs.readFileSync(filePath, 'utf-8');
             const win = BrowserWindow.getAllWindows()[0];
             if (!win || win.isDestroyed()) { respondError(-32000, 'No window'); return; }
+            // This method is token-gated, so the caller is an authenticated
+            // client that deliberately opened this file — the same standard as
+            // a native dialog, and enough to allow editing it back (F3).
+            grantMarkdownPath(win.webContents.id, filePath);
             await win.webContents.executeJavaScript(
-              `window.__wmux_setMarkdownContent?.(${JSON.stringify(request.params?.surfaceId || '')}, ${JSON.stringify(content)})`
+              `window.__wmux_setMarkdownContent?.(${JSON.stringify(request.params?.surfaceId || '')}, ${JSON.stringify(read.content)}, ${JSON.stringify(path.basename(filePath))}, ${JSON.stringify(filePath)}, ${JSON.stringify(read.mtimeMs)})`
             );
-            respond({ ok: true, length: content.length });
+            respond({ ok: true, length: read.content.length, filePath });
           } catch (err: any) { respondError(-32000, err.message); }
         })();
         break;
@@ -857,6 +954,7 @@ app.whenReady().then(() => {
         BrowserWindow.getAllWindows().forEach(w => {
           if (!w.isDestroyed()) w.webContents.send(IPC_CHANNELS.HOOK_EVENT, request.params);
         });
+        applyHookLifecycle(request.params);
         // Always push diff update for Edit/Write hooks (even without file path).
         // Delay slightly so the renderer has time to mount the DiffPane
         // (HOOK_EVENT triggers diff tab creation; DIFF_UPDATE needs to arrive after mount).
@@ -903,6 +1001,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   // Cancel pending auto-save timer
   if (autoSaveTimer !== null) {
     clearTimeout(autoSaveTimer);
@@ -924,8 +1023,6 @@ app.on('will-quit', () => {
   pipeServer.stop();
   cdpProxy.stop();
   portScanner.stop();
-  gitPoller.unwatchAll();
-  prPoller.stopAll();
 });
 
 app.on('window-all-closed', () => {

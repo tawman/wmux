@@ -3,8 +3,7 @@
  * so the main process can call them via executeJavaScript from V2 pipe handlers.
  */
 import { useStore } from './store';
-import { splitNode, removeLeaf, getAllPaneIds, findLeaf, buildGridLayout } from './store/split-utils';
-import { killSurfacePty } from './store/pty-teardown';
+import { splitNode, getAllPaneIds, findLeaf, buildGridLayout } from './store/split-utils';
 import { surfaceTerminalRegistry } from './hooks/useTerminal';
 import { PaneId, SurfaceId, WorkspaceId, SurfaceType } from '../shared/types';
 import { v4 as uuid } from 'uuid';
@@ -117,18 +116,9 @@ export function initPipeBridge(): void {
     const ws = store.workspaces.find(w => w.id === wsId);
     if (!ws) return;
 
-    // Reap the pane's shells before removing it (issue #65). `wmux close-pane`
-    // dropped the leaf without killing any PTY (mirrors PaneWrapper.handleClosePane,
-    // the UI path that always did kill its terminals).
-    const leaf = findLeaf(ws.splitTree, paneId as PaneId);
-    if (leaf) {
-      for (const surface of leaf.surfaces) killSurfacePty(surface);
-    }
-
-    const newTree = removeLeaf(ws.splitTree, paneId as PaneId);
-    if (newTree) {
-      store.updateSplitTree(wsId, newTree);
-    }
+    // Reaping + tree surgery live in the store action (issue #65 fixed the
+    // missing reap here; the last-pane case was still wrong in all three copies).
+    store.closePane(wsId, paneId as PaneId);
   };
 
   w.__wmux_layoutGrid = (params: { count: number; type?: string; anchorSurfaceId?: string; anchorPaneId?: string; workspaceId?: string }) => {
@@ -252,6 +242,23 @@ export function initPipeBridge(): void {
     }
   };
 
+  w.__wmux_renameSurface = (surfaceId: string, title: string, workspaceId?: string) => {
+    const store = useStore.getState();
+    const wsId = (workspaceId || store.activeWorkspaceId) as WorkspaceId;
+    if (!wsId) return { ok: false, error: 'No active workspace' };
+    const ws = store.workspaces.find(w => w.id === wsId);
+    if (!ws) return { ok: false, error: 'Workspace not found' };
+    const paneIds = getAllPaneIds(ws.splitTree);
+    for (const pid of paneIds) {
+      const leaf = findLeaf(ws.splitTree, pid);
+      if (leaf?.surfaces?.some(s => s.id === surfaceId)) {
+        store.renameSurface(wsId, pid, surfaceId as SurfaceId, title ?? '');
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: 'Surface not found' };
+  };
+
   w.__wmux_focusSurface = (surfaceId: string, workspaceId?: string) => {
     const store = useStore.getState();
     const wsId = (workspaceId || store.activeWorkspaceId) as WorkspaceId;
@@ -333,12 +340,39 @@ export function initPipeBridge(): void {
 
   // ─── Markdown ───────────────────────────────────────────────────────────────
 
-  w.__wmux_setMarkdownContent = (surfaceId: string, markdown: string) => {
+  w.__wmux_setMarkdownContent = (surfaceId: string, markdown: string, fileName?: string, filePath?: string, mtimeMs?: number) => {
     // Persist into the store so MarkdownPane (re)renders the content. The old
     // `wmux:markdown-update` CustomEvent had no listener, so content never
-    // displayed (issue #54).
-    useStore.getState().setMarkdownContent(surfaceId as SurfaceId, markdown ?? '');
+    // displayed (issue #54). `fileName`, when the content came from a file, is
+    // used as the tab label so multiple markdown tabs stay distinguishable;
+    // `filePath` makes the surface path-aware (issue #116) so the pane can show
+    // the path, copy it, reveal it, and reload from it.
+    // `mtimeMs` (F3) records what was on disk at load time so a later save can
+    // detect an agent having rewritten the file underneath the pane.
+    useStore.getState().setMarkdownContent(surfaceId as SurfaceId, markdown ?? '', { fileName, filePath, mtimeMs });
     return { ok: true };
+  };
+
+  // Read a markdown surface's buffer back out (issue #116). Mirrors
+  // __wmux_readScreen for terminals — an agent that pushed content has no other
+  // way to check what actually landed.
+  w.__wmux_getMarkdownContent = (surfaceId: string) => {
+    const state = useStore.getState();
+    for (const ws of state.workspaces) {
+      for (const paneId of getAllPaneIds(ws.splitTree)) {
+        const surface = findLeaf(ws.splitTree, paneId)?.surfaces.find((s) => s.id === surfaceId);
+        if (surface) {
+          return {
+            surfaceId,
+            content: surface.markdownContent ?? '',
+            filePath: surface.markdownFilePath ?? null,
+            fileName: surface.markdownFileName ?? null,
+            dirty: !!surface.markdownDirty,
+          };
+        }
+      }
+    }
+    return null;
   };
 
   // ─── Notifications ──────────────────────────────────────────────────────────

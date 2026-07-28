@@ -25,9 +25,8 @@
   ],
   "win": {
     "icon": "resources/icons/icon.ico",
-    "signtoolOptions": { "publisherName": ["SignPath Foundation"] },
     "target": [
-      { "target": "dir", "arch": ["x64"] }
+      { "target": "nsis", "arch": ["x64"] }
     ]
   },
   "nsis": {
@@ -35,7 +34,8 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "wmux"
+    "shortcutName": "wmux",
+    "artifactName": "wmux-${version}-setup.${ext}"
   },
   "portable": {
     "artifactName": "wmux-${version}-portable.exe"
@@ -47,6 +47,7 @@
     { "from": "resources/claude-instructions.md", "to": "claude-instructions/claude-instructions.md" },
     { "from": "src/shell-integration", "to": "shell-integration" },
     { "from": "dist/cli/wmux.js", "to": "cli/wmux.js" },
+    { "from": "dist/cli/wmux-hook.js", "to": "cli/wmux-hook.js" },
     { "from": "src/cli-bin", "to": "cli-bin" },
     { "from": "resources/wmux-orchestrator", "to": "wmux-orchestrator" }
   ]

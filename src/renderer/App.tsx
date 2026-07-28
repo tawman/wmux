@@ -4,6 +4,7 @@ import { useStore } from './store';
 import { PaneId, SurfaceId, WorkspaceId, WorkspaceInfo, SplitNode } from '../shared/types';
 import SplitContainer from './components/SplitPane/SplitContainer';
 import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface } from './store/split-utils';
+import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from './dev-ports';
 import { aggregateProgress } from './store/progress-slice';
 import Sidebar from './components/Sidebar/Sidebar';
 import Titlebar from './components/Titlebar/Titlebar';
@@ -11,11 +12,14 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import SettingsWindow from './components/Settings/SettingsWindow';
 import CommandPalette from './components/CommandPalette/CommandPalette';
 import ShortcutCheatSheet from './components/CheatSheet/ShortcutCheatSheet';
+import ConfirmCloseDialog from './components/ConfirmCloseDialog';
+import ConfirmCloseSurfaceDialog from './components/ConfirmCloseSurfaceDialog';
 import BrowserPane from './components/Browser/BrowserPane';
 import Tutorial from './components/Tutorial/Tutorial';
 import SplitPreviewOverlay from './components/SplitPane/SplitPreviewOverlay';
 import { initPipeBridge } from './pipe-bridge';
 import { useUiTheme } from './hooks/useUiTheme';
+import { useUiMode } from './hooks/useUiMode';
 import type {
   SurfaceDragCommitOptions,
   SurfaceDragPayload,
@@ -70,7 +74,26 @@ function findBottomPane(node: SplitNode): PaneId | null {
 // adds the in-app bell entry and raises the OS toast (via the renderer → main
 // NOTIFICATION_FIRE chokepoint).
 
-const DEV_PORTS = [3000, 3001, 4000, 4200, 5000, 5173, 5174, 8000, 8080, 8888];
+// Effective runtime values — seeded from the built-in defaults, then widened/
+// toggled by ~/.wmux/config.toml at startup and on `wmux reload-config`.
+let activeDevPorts: number[] = DEFAULT_DEV_PORTS;
+let autoOpenDevPort = true;
+
+/**
+ * Apply `~/.wmux/config.toml`'s `[browser]` section: dev-port detection + auto-open.
+ * Resets to the built-in defaults first so `wmux reload-config` is idempotent —
+ * deleting a key (or the whole section) from the file reverts its effect instead
+ * of leaving the previous run's values sticky until restart.
+ */
+function applyUserConfigBrowser(browser: any): void {
+  activeDevPorts = DEFAULT_DEV_PORTS;
+  autoOpenDevPort = true;
+  if (!browser) return;
+  if (Array.isArray(browser.devPorts) && browser.devPorts.length) {
+    activeDevPorts = mergeDevPorts(DEFAULT_DEV_PORTS, browser.devPorts);
+  }
+  if (typeof browser.autoOpen === 'boolean') autoOpenDevPort = browser.autoOpen;
+}
 
 type StoreAction = (...args: any[]) => void;
 type MetaDeps = {
@@ -97,17 +120,63 @@ function workspaceForSurface(surfaceId: string): WorkspaceInfo | undefined {
   return useStore.getState().workspaces.find(ws => getAllSurfaces(ws.splitTree).includes(surfaceId));
 }
 
+type HookActivityMap = Record<string, { lastTool: string; toolCount: number; lastSeen: number }>;
+
+/**
+ * Stop hook = the turn is over. Zero out lastSeen so the sidebar flips to
+ * "Idle" immediately instead of waiting out the ACTIVITY_TTL window, and
+ * upsert the entry so turns with zero tool uses (pure text generation) still
+ * register as "Claude ran here and finished" — otherwise WorkspaceRow falls
+ * back to the shell's perpetual "Running" while the TUI sits idle (issue #81).
+ *
+ * Keyed by SURFACE, not workspace: two Claude sessions split inside one
+ * workspace must not zero each other's freshness. Only surfaceId-less legacy
+ * events fall back to the active workspace's id as key.
+ */
+function markSessionIdleOnStop(
+  surfaceId: string,
+  setHookActivity: React.Dispatch<React.SetStateAction<HookActivityMap>>,
+): void {
+  const key = surfaceId || useStore.getState().activeWorkspaceId;
+  if (!key) return;
+  setHookActivity(prev => {
+    const existing = prev[key] || { lastTool: '', toolCount: 0, lastSeen: 0 };
+    return { ...prev, [key]: { ...existing, lastSeen: 0 } };
+  });
+}
+
+/**
+ * Auto-open a diff tab in the workspace's BOTTOM pane when Claude edits/writes
+ * files. Opt-out via Settings → Workspace (issue #66): users who find the tab
+ * popping up and stealing focus disruptive can turn it off entirely.
+ */
+function maybeAutoOpenDiffTab(tool: string, ownerWs: WorkspaceInfo): void {
+  const state = useStore.getState();
+  if ((tool !== 'Edit' && tool !== 'Write') || !state.workspacePrefs.autoOpenDiffTab) return;
+  const bottomPaneId = findBottomPane(ownerWs.splitTree);
+  if (!bottomPaneId) return;
+  const bottomLeaf = findLeafFromTree(ownerWs.splitTree, bottomPaneId);
+  // Only add diff tab if bottom pane doesn't already have one
+  if (bottomLeaf && !bottomLeaf.surfaces.some(s => s.type === 'diff')) {
+    state.addSurface(ownerWs.id, bottomPaneId, 'diff');
+  }
+}
+
 function handlePortsUpdate(cmd: any, updateWorkspaceMetadata: StoreAction): void {
   try {
     const portsByPid = JSON.parse(cmd.args?.[0] || '{}');
     const allPorts = Object.values(portsByPid).flat() as number[];
-    const devPorts = allPorts.filter((p: number) => DEV_PORTS.includes(p));
+    const devPorts = matchDevPorts(allPorts, activeDevPorts);
     if (devPorts.length > 0) {
       const currentWs = useStore.getState().activeWorkspaceId;
       const ws = useStore.getState().workspaces.find(w => w.id === currentWs);
-      // Only auto-navigate the browser to a NEW dev port.
-      if (currentWs && !(ws?.ports || []).includes(devPorts[0])) {
-        window.wmux?.browser?.navigate?.(`browser-${currentWs}`, `http://localhost:${devPorts[0]}`);
+      // Auto-navigate to a newly-appeared dev port — one this workspace hasn't seen
+      // yet — rather than blindly devPorts[0]. Otherwise a freshly-started server
+      // never opens when other recognized ports are already listening (netstat order
+      // is arbitrary), and the guard permanently suppresses navigation thereafter.
+      const newPort = firstNewDevPort(devPorts, ws?.ports || []);
+      if (autoOpenDevPort && currentWs && newPort !== undefined) {
+        window.wmux?.browser?.navigate?.(`browser-${currentWs}`, `http://localhost:${newPort}`);
       }
     }
     for (const ws of useStore.getState().workspaces) {
@@ -141,9 +210,12 @@ function applyShellState(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
   delete deps.runningStartTimes.current[ws.id];
   if (elapsed < 5) return;
 
-  const duration = elapsed >= 60
-    ? `${Math.floor(elapsed / 60)}m${Math.round(elapsed % 60)}s`
-    : `${Math.round(elapsed)}s`;
+  // Round to whole seconds BEFORE splitting into minutes — rounding the
+  // remainder independently yields "3m60s" for 239.6s elapsed.
+  const totalSeconds = Math.round(elapsed);
+  const duration = totalSeconds >= 60
+    ? `${Math.floor(totalSeconds / 60)}m${totalSeconds % 60}s`
+    : `${totalSeconds}s`;
   const msg = newState === 'interrupted'
     ? `Interrupted in ${ws.title} (${duration})`
     : `Finished in ${ws.title} (${duration})`;
@@ -153,9 +225,22 @@ function applyShellState(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
 /** Dispatch a surface-scoped metadata command to the owning workspace. */
 function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
   switch (cmd.command) {
-    case 'report_pwd':
-      deps.updateWorkspaceMetadata(ws.id, { cwd: cmd.args?.[0] });
+    case 'report_pwd': {
+      const pwd = cmd.args?.[0];
+      deps.updateWorkspaceMetadata(ws.id, { cwd: pwd });
+      // Also store cwd at the surface level so the tab label can show the project folder.
+      if (pwd && cmd.surfaceId) {
+        const { updateSurface } = useStore.getState();
+        for (const paneId of getAllPaneIds(ws.splitTree)) {
+          const leaf = findLeaf(ws.splitTree, paneId);
+          if (leaf?.surfaces.some((s) => s.id === cmd.surfaceId)) {
+            updateSurface(ws.id, paneId, cmd.surfaceId, { currentCwd: pwd });
+            break;
+          }
+        }
+      }
       break;
+    }
     case 'report_git_branch':
       deps.updateWorkspaceMetadata(ws.id, { gitBranch: cmd.args?.[0], gitDirty: cmd.args?.[1] === 'dirty' });
       break;
@@ -267,7 +352,7 @@ export default function App() {
     workspaces,
     activeWorkspaceId,
     createWorkspace,
-    closeWorkspace,
+    requestCloseWorkspace,
     selectWorkspace,
     renameWorkspace,
     reorderWorkspaces,
@@ -285,6 +370,7 @@ export default function App() {
   } = useStore();
 
   useUiTheme();
+  useUiMode();
 
   const [focusedPaneId, setFocusedPaneId] = useState<PaneId | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -425,6 +511,7 @@ export default function App() {
     const apply = (result: any) => {
       const state = useStore.getState();
       applyUserConfigTerminal(state, result?.terminal);
+      applyUserConfigBrowser(result?.browser);
 
       // App UI theme override (issue #67): `[appearance] ui-theme = "..."`.
       const uiTheme = result?.appearance?.uiTheme;
@@ -440,6 +527,14 @@ export default function App() {
   useEffect(() => {
     if (!window.wmux?.agent?.onUpdate) return;
     const unsub = window.wmux.agent.onUpdate((event: any) => {
+      if (event.type === 'exited') {
+        // Flip the sidebar agent line to done; no-op for unknown surfaces.
+        const existing = useStore.getState().agentMeta.get(event.surfaceId);
+        if (existing && existing.status !== 'exited') {
+          setAgentMeta(event.surfaceId, { ...existing, status: 'exited', exitCode: event.exitCode });
+        }
+        return;
+      }
       if (event.type === 'spawned') {
         const { surfaceId, paneId, workspaceId, label } = event;
         const state = useStore.getState();
@@ -503,25 +598,22 @@ export default function App() {
       // Stop = agent finished its turn. These have no `tool`, so handle first.
       if (event?.event === 'Notification' || event?.event === 'Stop') {
         handleAgentLifecycleEvent(event, addNotification);
+        if (event.event === 'Stop') markSessionIdleOnStop(event.surfaceId, setHookActivity);
         return;
       }
       if (!event?.tool) return;
       const state = useStore.getState();
-      // Resolve the workspace that OWNS the agent's pane (issue #63), so the
-      // diff tab and sidebar activity attach to the agent's workspace — not
-      // whichever workspace happens to be focused. Fall back to the active
-      // workspace only when the event carries no surfaceId (legacy hooks).
-      const ownerWs = workspaceForSurface(event.surfaceId)
-        ?? state.workspaces.find(w => w.id === state.activeWorkspaceId);
-      if (!ownerWs) return;
-      const wsId = ownerWs.id;
-
-      // Track hook activity for sidebar display
+      // Key hook activity by SURFACE when the event carries one — each Claude
+      // session (pane) tracks its own freshness, so two sessions in the same
+      // workspace can't clobber each other into a stuck "Running"/false "Idle".
+      // Legacy events without surfaceId fall back to the active workspace id.
+      const key = event.surfaceId || state.activeWorkspaceId;
+      if (!key) return;
       setHookActivity(prev => {
-        const existing = prev[wsId] || { lastTool: '', toolCount: 0, lastSeen: 0 };
+        const existing = prev[key] || { lastTool: '', toolCount: 0, lastSeen: 0 };
         return {
           ...prev,
-          [wsId]: {
+          [key]: {
             lastTool: event.tool,
             toolCount: existing.toolCount + 1,
             lastSeen: Date.now(),
@@ -529,27 +621,19 @@ export default function App() {
         };
       });
 
-      // Auto-open diff tab in the BOTTOM pane when Claude edits/writes files.
-      // Opt-out via Settings → Workspace (issue #66): users who find the tab
-      // popping up and stealing focus disruptive can turn it off entirely.
-      if ((event.tool === 'Edit' || event.tool === 'Write') && state.workspacePrefs.autoOpenDiffTab) {
-        const ws = ownerWs;
-        if (ws) {
-          const bottomPaneId = findBottomPane(ws.splitTree);
-          if (bottomPaneId) {
-            const bottomLeaf = findLeafFromTree(ws.splitTree, bottomPaneId);
-            // Only add diff tab if bottom pane doesn't already have one
-            if (bottomLeaf && !bottomLeaf.surfaces.some(s => s.type === 'diff')) {
-              state.addSurface(wsId, bottomPaneId, 'diff');
-            }
-          }
-        }
-      }
+      // Diff tab opens in the workspace that OWNS the pane (issue #63). A
+      // surfaceId that doesn't resolve here belongs to another window —
+      // opening a diff tab in whatever workspace is focused would misfire.
+      const ownerWs = event.surfaceId
+        ? workspaceForSurface(event.surfaceId)
+        : state.workspaces.find(w => w.id === state.activeWorkspaceId);
+      if (ownerWs) maybeAutoOpenDiffTab(event.tool, ownerWs);
     });
     return unsub;
   }, []);
 
   // NOTE: hookActivity entries are intentionally kept forever (not cleaned up).
+  // Keys are surface ids (per Claude session) or workspace ids (legacy events).
   // WorkspaceRow uses the lastSeen timestamp + TTL to decide what to display.
   // Keeping stale entries lets us distinguish "Claude was active but stopped"
   // (idle) from "a regular shell command is running" (no hookActivity at all).
@@ -875,7 +959,7 @@ export default function App() {
             sidebarWidth={sidebarWidth}
             onWidthChange={handleSidebarWidthChange}
             onSelect={selectWorkspace}
-            onClose={closeWorkspace}
+            onClose={requestCloseWorkspace}
             onCreate={handleCreateWorkspace}
             onRename={renameWorkspace}
             onReorder={reorderWorkspaces}
@@ -885,6 +969,10 @@ export default function App() {
             onSaveSession={handleSaveSession}
             onLoadSession={handleLoadSession}
             onCollapse={toggleSidebar}
+            onFocusAgentPane={(wsId, paneId) => {
+              selectWorkspace(wsId);
+              setFocusedPaneId(paneId);
+            }}
           />
         ) : (
           <div
@@ -1061,6 +1149,9 @@ export default function App() {
       )}
 
       {cheatSheetOpen && <ShortcutCheatSheet onClose={() => setCheatSheetOpen(false)} />}
+
+      <ConfirmCloseDialog />
+      <ConfirmCloseSurfaceDialog />
 
       {broadcastInputActive && (
         <div className="broadcast-input-banner" title="Typed input is sent to every terminal pane in this workspace">

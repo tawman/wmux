@@ -1,9 +1,15 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { WorkspaceInfo, SplitNode } from '../../../shared/types';
+import { WorkspaceInfo, SplitNode, PaneId } from '../../../shared/types';
 import { useStore } from '../../store';
 import { aggregateProgress } from '../../store/progress-slice';
+import { agentsForWorkspace, resolveAgentLinger, WorkspaceAgentsView } from '../../store/agent-view';
+import { claudeSessionsForWorkspace, HookActivityEntry } from '../../store/claude-session-view';
 import UnreadBadge from './UnreadBadge';
 import PrStatusIcon from './PrStatusIcon';
+import { traceState, toolChannel } from './trace-signals';
+
+/** Stable empty view — avoids allocating a fresh object every collapsed tick. */
+const EMPTY_AGENTS_VIEW: WorkspaceAgentsView = { lines: [], total: 0, running: 0 };
 
 function getAllSurfaceIds(tree: SplitNode): string[] {
   if (tree.type === 'leaf') return tree.surfaces.map(s => s.id);
@@ -27,6 +33,73 @@ function getToolLabel(tool: string): string {
   }
 }
 
+/** Detail text of one Claude session sub-line. */
+function sessionDetailText(working: boolean, tool: string | null): string {
+  if (!working) return 'Idle';
+  return tool ? getToolLabel(tool) : 'Running…';
+}
+
+interface StatusTextInputs {
+  statusOverride?: 'running' | 'idle';
+  runningAgentCount: number;
+  agentTotal: number;
+  sessionCount: number;
+  workingSessions: number;
+  currentToolLabel: string | null;
+  claudeIsIdle: boolean;
+  shellState?: string;
+  notificationText?: string;
+}
+
+/** Priorities 0–2: Claude-derived signals. Null → fall through to shell state. */
+function claudeStatusText(s: StatusTextInputs): string | null {
+  // Priority 0: user pinned the status by hand (issue #81) — detection
+  // heuristics can misread tools that keep the shell "running" while idle.
+  if (s.statusOverride) {
+    return s.statusOverride === 'running' ? 'Running' : 'Idle';
+  }
+
+  // Priority 0.5: agents are running — show the orchestration summary
+  if (s.runningAgentCount > 0) {
+    return `Orchestrating · ${s.agentTotal} agent${s.agentTotal > 1 ? 's' : ''}`;
+  }
+
+  // Priority 0.75: several Claude sessions in this workspace — summarize;
+  // the per-session sub-lines below the status carry the detail.
+  if (s.sessionCount >= 2) {
+    return s.workingSessions > 0
+      ? `Claude · ${s.workingSessions}/${s.sessionCount} running`
+      : 'Idle';
+  }
+
+  // Priority 1: Claude is actively using a tool
+  if (s.currentToolLabel) return s.currentToolLabel;
+
+  // Priority 2: Claude was working but stopped → idle, not "Running"
+  if (s.claudeIsIdle) return 'Idle';
+
+  return null;
+}
+
+/** Status line priority chain: override > agents > sessions > tool > idle > shell > notification. */
+function resolveStatusText(s: StatusTextInputs): string {
+  const claude = claudeStatusText(s);
+  if (claude) return claude;
+
+  // Priority 3: Shell state from shell integration
+  if (s.shellState === 'running') return 'Running';
+  if (s.shellState === 'interrupted') return 'Interrupted';
+  if (s.shellState === 'idle') {
+    return s.notificationText ? `Done: ${s.notificationText}` : 'Idle';
+  }
+
+  // Priority 4: Notification text without shell state
+  if (s.notificationText) return s.notificationText;
+
+  // Priority 5: Default — always show something
+  return 'Idle';
+}
+
 interface WorkspaceRowProps {
   workspace: WorkspaceInfo;
   isActive: boolean;
@@ -39,10 +112,14 @@ interface WorkspaceRowProps {
   onDragOver?: (e: React.DragEvent) => void;
   onDrop?: (e: React.DragEvent) => void;
   onDragEnd?: (e: React.DragEvent) => void;
-  isDragOver?: boolean;
-  agentCount?: number;
-  hookActivity?: { lastTool: string; toolCount: number; lastSeen: number };
+  /** Which edge of this row the dragged workspace would land on, or null when
+   *  it isn't the drop target. The marker has to name an edge: drawing it
+   *  always above the hovered row lied about every downward move (issue #124). */
+  dropEdge?: 'above' | 'below' | null;
+  /** Full hook-activity map — keyed by surface id (per Claude session) or workspace id (legacy). */
+  hookActivity?: Record<string, HookActivityEntry>;
   claudeActivity?: Record<string, any>;
+  onFocusAgentPane?: (paneId: PaneId) => void;
 }
 
 export default function WorkspaceRow({
@@ -57,10 +134,10 @@ export default function WorkspaceRow({
   onDragOver,
   onDrop,
   onDragEnd,
-  isDragOver = false,
-  agentCount = 0,
+  dropEdge = null,
   hookActivity,
   claudeActivity,
+  onFocusAgentPane,
 }: WorkspaceRowProps) {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(workspace.title);
@@ -77,19 +154,20 @@ export default function WorkspaceRow({
     return () => document.removeEventListener('wmux:rename-workspace', handler);
   }, [isActive, workspace.title]);
 
-  const activeBackground = workspace.customColor ?? '#0091FF';
-  // 15% alpha tint for inactive colored rows. The previous 5% (`0D`) was
-  // indistinguishable from the sidebar background on dark themes (issue #80).
-  const customColorTint = workspace.customColor
-    ? `${workspace.customColor}26`
-    : undefined;
-  // Solid color rail so the assigned color reads unambiguously even where a
-  // translucent tint can't (issue #80). Skipped on the active row, whose full
-  // background is already the custom color (the CSS overlay rail stays).
-  const railStyle: React.CSSProperties | undefined =
-    workspace.customColor && !isActive
-      ? { background: workspace.customColor, opacity: 1 }
-      : undefined;
+  // Emit the workspace colour as a CUSTOM PROPERTY, not as a background.
+  //
+  // The old code set `backgroundColor` inline, which beat every class rule and
+  // so hardcoded *how* the accent was expressed: an opaque fill. That is what
+  // flattened the live agent status colours the moment a row was selected, and
+  // it is why the shipped `activeTabIndicator` preference could never take
+  // effect. An inline custom property does not beat the class rule — it feeds
+  // it, so CSS decides the treatment (rail / tint / fill) while the colour
+  // still comes from the workspace. issue #10 (customColor must win) and
+  // issue #80 (15% tint, not 5%) both survive; see sidebar.css.
+  const rowStyle: React.CSSProperties = {};
+  if (workspace.customColor) {
+    (rowStyle as Record<string, string>)['--row-accent'] = workspace.customColor;
+  }
 
   // Tick counter — forces re-evaluation of time-based memos every 2 seconds.
   // Without this, useMemo caches stale Date.now() results because the deps
@@ -101,6 +179,12 @@ export default function WorkspaceRow({
   }, []);
 
   // OSC 9;4 progress from this workspace's terminals, folded into one bar.
+  // Shipped in settings, persisted, exposed in a <select> — and read by nothing
+  // under Sidebar/ until now, which is why selecting a row was always an opaque
+  // fill regardless of the preference.
+  const activeTabIndicator = useStore((state) => state.sidebarPrefs.activeTabIndicator);
+  const uiMode = useStore((state) => state.appearancePrefs.uiMode);
+
   const surfaceProgress = useStore((state) => state.surfaceProgress);
   const wsProgress = useMemo(() => {
     const ids = getAllSurfaceIds(workspace.splitTree);
@@ -118,81 +202,143 @@ export default function WorkspaceRow({
     return null;
   }, [claudeActivity, workspace.splitTree]);
 
-  let rowStyle: React.CSSProperties = {};
-  if (isActive) {
-    rowStyle = { backgroundColor: activeBackground };
-  } else if (customColorTint) {
-    rowStyle = { backgroundColor: customColorTint };
-  }
+  // ── Unified agent list (observer subagents + wmux-spawned agents) ──
+  const agentMeta = useStore((state) => state.agentMeta);
+  const doneAtRef = useRef<number | null>(null);
+  const wsAgents = useMemo<WorkspaceAgentsView>(() => {
+    const now = Date.now();
+    const view = agentsForWorkspace(workspace.splitTree, claudeActivity ?? {}, agentMeta, now);
+    if (view.lines.length === 0) { doneAtRef.current = null; return EMPTY_AGENTS_VIEW; }
+    const linger = resolveAgentLinger(view.running === 0, doneAtRef.current, now);
+    // The ref write lives in the memo, not an effect: the linger decision must
+    // resolve synchronously with the list it gates (an effect would apply the
+    // doneAt stamp one render late). Idempotent, so a StrictMode double render
+    // lands on the same state.
+    doneAtRef.current = linger.doneAt;
+    return linger.visible ? view : EMPTY_AGENTS_VIEW;
+  }, [workspace.splitTree, claudeActivity, agentMeta, tick]);
+  const runningAgentCount = wsAgents.running;
 
   // How long a tool label persists after the last hook/observer event (ms)
   const ACTIVITY_TTL = 5000;
 
+  // ── Per-surface Claude sessions (2 claude panes = 2 independent states) ──
+  const sessionsView = useMemo(
+    () => claudeSessionsForWorkspace(workspace.splitTree, claudeActivity ?? {}, hookActivity ?? {}, Date.now()),
+    [workspace.splitTree, claudeActivity, hookActivity, tick],
+  );
+  const sessions = sessionsView.sessions;
+  const workingSessions = sessionsView.working;
+
+  // Legacy workspace-keyed entry — only written by hook events with no surfaceId.
+  const legacyHook = hookActivity?.[workspace.id];
+
   // ── Determine if Claude is actively working (recent hook or observer data) ──
   const isClaudeActive = useMemo(() => {
+    if (workingSessions > 0) return true;
     const now = Date.now();
-    if (hookActivity && now - hookActivity.lastSeen < ACTIVITY_TTL) return true;
+    if (legacyHook && now - legacyHook.lastSeen < ACTIVITY_TTL) return true;
     if (wsActivity && now - wsActivity.lastUpdate < ACTIVITY_TTL) return true;
     return false;
-  }, [hookActivity, wsActivity, tick]);
+  }, [workingSessions, legacyHook, wsActivity, tick]);
+
+  // ── TRACE mode (issue #118) ──────────────────────────────────────────────
+  // Rate is derived by comparing the monotonic tool counter against the
+  // previous sample. The sample is taken inside the memo that already runs on
+  // the existing 2s tick — no new timer, no rAF, no per-row interval.
+  //
+  // MUST stay below `isClaudeActive`: it reads that binding in its dependency
+  // array, and a deps array is a plain array literal evaluated at the call site
+  // — only the callback is deferred. Declared above, the read hit the temporal
+  // dead zone on *every* render including classic mode, and 0.35.0 shipped with
+  // every workspace row throwing straight into the ErrorBoundary. tsc catches
+  // this as TS2448; see tests/unit/renderer-typecheck.test.ts, which is why the
+  // renderer now has a type gate at all.
+  const traceRateRef = useRef<{ toolCount: number; at: number }>({ toolCount: 0, at: 0 });
+  const rowTrace = useMemo(() => {
+    if (uiMode !== 'trace') return null;
+    const now = Date.now();
+    const ids = getAllSurfaceIds(workspace.splitTree);
+    const entries = ids.map((id) => hookActivity?.[id]).filter(Boolean) as HookActivityEntry[];
+
+    // Sum, not first-match: a workspace with several Claude panes has several
+    // counters, and the odometer is a workspace-level odometer.
+    const toolCount = entries.reduce((sum, e) => sum + (e.toolCount || 0), 0);
+    const lastSeen = entries.reduce((max, e) => Math.max(max, e.lastSeen || 0), 0);
+    const active = sessions.find((s) => s.working && s.tool);
+
+    const prev = traceRateRef.current;
+    const state = traceState({
+      working: workingSessions > 0 || isClaudeActive,
+      tool: active?.tool ?? null,
+      toolCount,
+      lastSeen,
+      prev: prev.at ? prev : undefined,
+      now,
+    });
+    // Idempotent under a StrictMode double render: same inputs, same write.
+    if (toolCount !== prev.toolCount) traceRateRef.current = { toolCount, at: now };
+
+    return { ...state, toolCount };
+  }, [uiMode, workspace.splitTree, hookActivity, sessions, workingSessions, isClaudeActive, tick]);
+
+  if (rowTrace) {
+    // Two numbers, both continuous, both read by CSS. --tr-lit is the staleness
+    // ramp and --tr-flow-dur is the dash period; keeping them as plain inline
+    // custom properties (rather than registered @property values inherited on
+    // the row) avoids forcing a style recalc of the whole row subtree on every
+    // frame of a transition.
+    //
+    // Still mutates `rowStyle` before the JSX below consumes it as `style=`.
+    const s = rowStyle as Record<string, string>;
+    s['--tr-lit'] = rowTrace.lit.toFixed(2);
+    s['--tr-flow-dur'] = `${rowTrace.flowMs}ms`;
+  }
 
   // ── Current tool label (from observer or hooks) ──
   const currentToolLabel = useMemo(() => {
+    // Prefer per-session state — first working session with a known tool.
+    const active = sessions.find(s => s.working && s.tool);
+    if (active?.tool) return getToolLabel(active.tool);
     const now = Date.now();
-    // Prefer observer data (more specific — comes from PTY output parsing)
     if (wsActivity?.lastTool && now - wsActivity.lastUpdate < ACTIVITY_TTL) {
       return getToolLabel(wsActivity.lastTool);
     }
-    // Fall back to hook data
-    if (hookActivity?.lastTool && now - hookActivity.lastSeen < ACTIVITY_TTL) {
-      return getToolLabel(hookActivity.lastTool);
+    if (legacyHook?.lastTool && now - legacyHook.lastSeen < ACTIVITY_TTL) {
+      return getToolLabel(legacyHook.lastTool);
     }
     return null;
-  }, [wsActivity, hookActivity, tick]);
+  }, [sessions, wsActivity, legacyHook, tick]);
 
   // ── Detect "Claude was active but stopped" (shell still says running) ──
   const claudeIsIdle = useMemo(() => {
     if (workspace.shellState !== 'running') return false;
+    // Sessions tracked per surface: idle only when EVERY session stopped —
+    // one busy claude pane never reads as workspace-wide idle, and one idle
+    // claude pane never keeps the row on "Running" (the 2-window bug).
+    if (sessions.length > 0) return workingSessions === 0;
     // Observer saw "Baked for" / "Cost:" — Claude explicitly finished
     if (wsActivity?.isDone) return true;
     // Hook activity went stale — Claude stopped using tools
-    if (hookActivity) {
+    if (legacyHook) {
       const now = Date.now();
-      return now - hookActivity.lastSeen >= ACTIVITY_TTL;
+      return now - legacyHook.lastSeen >= ACTIVITY_TTL;
     }
     return false;
-  }, [workspace.shellState, wsActivity, hookActivity, tick]);
+  }, [workspace.shellState, sessions, workingSessions, wsActivity, legacyHook, tick]);
 
   // ── Status text: manual override > tool activity > shell state > default ──
-  const statusText = useMemo(() => {
-    // Priority 0: user pinned the status by hand (issue #81) — detection
-    // heuristics can misread tools that keep the shell "running" while idle.
-    if (workspace.statusOverride) {
-      return workspace.statusOverride === 'running' ? 'Running' : 'Idle';
-    }
-
-    // Priority 1: Claude is actively using a tool
-    if (currentToolLabel) return currentToolLabel;
-
-    // Priority 2: Claude was working but stopped → idle, not "Running"
-    if (claudeIsIdle) return 'Idle';
-
-    // Priority 3: Shell state from shell integration
-    const state = workspace.shellState;
-    if (state === 'running') return 'Running';
-    if (state === 'interrupted') return 'Interrupted';
-    if (state === 'idle') {
-      return workspace.notificationText
-        ? `Done: ${workspace.notificationText}`
-        : 'Idle';
-    }
-
-    // Priority 4: Notification text without shell state
-    if (workspace.notificationText) return workspace.notificationText;
-
-    // Priority 5: Default — always show something
-    return 'Idle';
-  }, [workspace.statusOverride, currentToolLabel, claudeIsIdle, workspace.shellState, workspace.notificationText]);
+  const statusText = useMemo(() => resolveStatusText({
+    statusOverride: workspace.statusOverride,
+    runningAgentCount,
+    agentTotal: wsAgents.total,
+    sessionCount: sessions.length,
+    workingSessions,
+    currentToolLabel,
+    claudeIsIdle,
+    shellState: workspace.shellState,
+    notificationText: workspace.notificationText,
+  }), [workspace.statusOverride, runningAgentCount, wsAgents, sessions, workingSessions, currentToolLabel, claudeIsIdle, workspace.shellState, workspace.notificationText]);
 
   // ── Status color class ──
   const statusClass = useMemo(() => {
@@ -201,6 +347,10 @@ export default function WorkspaceRow({
         ? 'workspace-row__status--running'
         : 'workspace-row__status--idle';
     }
+    if (runningAgentCount > 0) return 'workspace-row__status--working';
+    if (sessions.length >= 2) {
+      return workingSessions > 0 ? 'workspace-row__status--working' : 'workspace-row__status--idle';
+    }
     if (currentToolLabel) return 'workspace-row__status--working';
     if (claudeIsIdle) return 'workspace-row__status--idle';
     const state = workspace.shellState;
@@ -208,7 +358,7 @@ export default function WorkspaceRow({
     if (state === 'interrupted') return 'workspace-row__status--interrupted';
     if (state === 'idle') return 'workspace-row__status--done';
     return 'workspace-row__status--idle';
-  }, [workspace.statusOverride, currentToolLabel, claudeIsIdle, workspace.shellState]);
+  }, [workspace.statusOverride, runningAgentCount, currentToolLabel, claudeIsIdle, workspace.shellState]);
 
   // ── Context line: "branch* · ~/path/to/dir" ──
   const contextLine = useMemo(() => {
@@ -247,9 +397,21 @@ export default function WorkspaceRow({
       className={[
         'workspace-row',
         isActive ? 'workspace-row--active' : '',
-        isDragOver ? 'workspace-row--drag-over' : '',
+        // Selection treatment now honours the shipped preference. `leftRail`
+        // (the default) is a rail + inset ring over an elevated tint;
+        // `solidFill` restores the pre-0.35 opaque block for anyone who wants it.
+        isActive && activeTabIndicator === 'solidFill' ? 'workspace-row--fill' : '',
+        workspace.customColor ? 'workspace-row--custom' : '',
+        dropEdge ? `workspace-row--drop-${dropEdge}` : '',
       ].filter(Boolean).join(' ')}
       style={rowStyle}
+      // TRACE drives everything from attributes so the CSS owns the rendering
+      // and no style object is rebuilt per tick. Absent in classic mode, where
+      // rowTrace is null and none of these selectors exist.
+      data-tr-live={rowTrace?.live ? '1' : undefined}
+      data-tr-blocked={rowTrace?.blocked ? '1' : undefined}
+      data-tr-chan={rowTrace?.channel ?? undefined}
+      data-tr-telemetry={rowTrace?.noTelemetry ? 'none' : undefined}
       onClick={onSelect}
       onContextMenu={onContextMenu}
       draggable={draggable}
@@ -258,11 +420,24 @@ export default function WorkspaceRow({
       onDrop={onDrop}
       onDragEnd={onDragEnd}
     >
-      <span className="workspace-row__rail" style={railStyle} />
+      {/* Rail colour comes from --row-accent now, so it no longer needs an
+          inline override that the active row used to have to fight. */}
+      <span className="workspace-row__rail" />
 
       {/* Line 1: Title */}
       <div className="workspace-row__header">
         <span className={`workspace-row__state-dot ${stateDotClass}`} />
+        {/* One ring per tool call. Keyed on the tool counter so React remounts
+            the span and the one-shot animation replays — genuinely evented,
+            rather than a loop that runs whether or not anything happened.
+            Bucketed to cap the remount rate on a very fast agent. */}
+        {rowTrace?.live && !rowTrace.blocked && (
+          <span
+            key={`ping-${Math.floor(rowTrace.toolCount / 2)}`}
+            className="workspace-row__via-ping"
+            aria-hidden="true"
+          />
+        )}
         {isRenaming ? (
           <input
             className="workspace-row__rename-input"
@@ -303,6 +478,20 @@ export default function WorkspaceRow({
           </span>
         )}
 
+        {/* Work odometer: total tool calls this workspace's sessions have made.
+            hookActivity[].toolCount is live, monotonic and deliberately never
+            garbage-collected — and was rendered nowhere in the app until now.
+            Static text, so it is the one part of TRACE that survives a narrow
+            sidebar, reduced motion, and a screenshot. */}
+        {!!rowTrace && rowTrace.toolCount > 0 && (
+          <span
+            className="workspace-row__odometer"
+            title={`${rowTrace.toolCount} tool calls in this workspace`}
+          >
+            {rowTrace.toolCount}
+          </span>
+        )}
+
         {workspace.unreadCount > 0 && (
           <UnreadBadge count={workspace.unreadCount} isSelected={isActive} />
         )}
@@ -323,6 +512,67 @@ export default function WorkspaceRow({
       <div className={`workspace-row__status ${statusClass}`}>
         {statusText}
       </div>
+
+      {/* Per-Claude-session sub-lines — one per pane running Claude Code,
+          shown as soon as the workspace hosts 2+ sessions (click → focus pane) */}
+      {sessions.length >= 2 && (
+        <div className="workspace-row__agents workspace-row__sessions">
+          {sessions.map((s, i) => (
+            <div
+              key={s.surfaceId}
+              className={[
+                'workspace-row__agent',
+                'workspace-row__agent--clickable',
+                'workspace-row__session',
+                s.working ? '' : 'workspace-row__session--idle',
+              ].filter(Boolean).join(' ')}
+              // Per-session channel: this is what makes "that one is REWRITING
+              // my code, that one is only reading" legible at a glance. Bound
+              // to the tool name, a closed vocabulary from the hook, so an
+              // unknown tool falls back to the neutral bus colour rather than
+              // being miscoloured as something harmless.
+              data-tr-live={uiMode === 'trace' && s.working ? '1' : undefined}
+              data-tr-chan={uiMode === 'trace' ? (toolChannel(s.tool) ?? undefined) : undefined}
+              onClick={(e) => {
+                e.stopPropagation();
+                onFocusAgentPane?.(s.paneId);
+              }}
+            >
+              <span className="workspace-row__agent-glyph" aria-hidden="true">{i === sessions.length - 1 ? '└' : '├'}</span>
+              {s.working && <span className="workspace-row__agent-dot" />}
+              <span className="workspace-row__agent-name">{s.label}</span>
+              <span className={`workspace-row__agent-detail${uiMode === 'trace' ? ' workspace-row__session-tool' : ''}`}>
+                {sessionDetailText(s.working, s.tool)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Agent sub-lines — only while agents run (+10s linger with ✓) */}
+      {wsAgents.lines.length > 0 && (
+        <div className="workspace-row__agents">
+          {wsAgents.lines.map((agent, i) => (
+            <div
+              key={agent.key}
+              className={[
+                'workspace-row__agent',
+                agent.done ? 'workspace-row__agent--done' : '',
+                agent.paneId ? 'workspace-row__agent--clickable' : '',
+              ].filter(Boolean).join(' ')}
+              onClick={agent.paneId ? (e) => {
+                e.stopPropagation();
+                onFocusAgentPane?.(agent.paneId!);
+              } : undefined}
+            >
+              <span className="workspace-row__agent-glyph" aria-hidden="true">{i === wsAgents.lines.length - 1 ? '└' : '├'}</span>
+              {!agent.done && <span className="workspace-row__agent-dot" />}
+              <span className="workspace-row__agent-name">{agent.name}</span>
+              <span className="workspace-row__agent-detail">{agent.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* OSC 9;4 progress bar — only while a terminal reports progress */}
       {wsProgress && (
@@ -358,19 +608,6 @@ export default function WorkspaceRow({
       {contextLine && (
         <div className="workspace-row__context">
           {contextLine}
-        </div>
-      )}
-
-      {/* Claude agent activity — sub-agents with status */}
-      {wsActivity?.agents?.length > 0 && (
-        <div className="workspace-row__claude-activity">
-          {wsActivity.agents.map((agent: any, i: number) => (
-            <div key={i} className="workspace-row__agent-line">
-              <span className={`workspace-row__agent-dot ${agent.done ? 'workspace-row__agent-dot--done' : 'workspace-row__agent-dot--working'}`} />
-              <span className="workspace-row__agent-name">{agent.name}</span>
-              <span className="workspace-row__agent-tokens">{agent.tokens}tok</span>
-            </div>
-          ))}
         </div>
       )}
 

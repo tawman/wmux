@@ -61,10 +61,17 @@ function sendV1(command: string): Promise<string> {
       client.write(line + '\n');
     });
     let data = '';
-    client.on('data', (chunk) => { data += chunk.toString(); });
-    client.on('end', () => resolve(data.trim()));
-    client.on('error', (err) => reject(err));
-    setTimeout(() => { client.end(); resolve(data.trim()); }, 5000);
+    const timer = setTimeout(() => { client.end(); resolve(data.trim()); }, 5000);
+    const finish = () => { clearTimeout(timer); resolve(data.trim()); };
+    client.on('data', (chunk) => {
+      data += chunk.toString();
+      // V1 replies are a single newline-terminated line (pong/ok/unauthorized).
+      // Resolve as soon as it arrives instead of blocking on the server closing
+      // the socket (it doesn't) — otherwise every call waited the full 5s timer.
+      if (data.includes('\n')) { client.end(); finish(); }
+    });
+    client.on('end', finish);
+    client.on('error', (err) => { clearTimeout(timer); reject(err); });
   });
 }
 
@@ -81,9 +88,11 @@ function sendV2(method: string, params: Record<string, any> = {}): Promise<any> 
       client.write(request + '\n');
     });
     let data = '';
+    const timer = setTimeout(() => { client.end(); reject(new Error('timeout')); }, 5000);
     client.on('data', (chunk) => {
       data += chunk.toString();
       if (data.includes('\n')) {
+        clearTimeout(timer);
         client.end();
         try {
           const response = JSON.parse(data.trim());
@@ -92,8 +101,7 @@ function sendV2(method: string, params: Record<string, any> = {}): Promise<any> 
         } catch { resolve(data.trim()); }
       }
     });
-    client.on('error', (err) => reject(err));
-    setTimeout(() => { client.end(); reject(new Error('timeout')); }, 5000);
+    client.on('error', (err) => { clearTimeout(timer); reject(err); });
   });
 }
 
@@ -235,15 +243,24 @@ async function cmdMarkdown(args: string[]): Promise<void> {
     const surfaceId = args[2];
     const contentFlag = args.indexOf('--content');
     const fileFlag = args.indexOf('--file');
+    const titleFlag = args.indexOf('--title');
+    const title = titleFlag !== -1 ? args[titleFlag + 1] : undefined;
     if (contentFlag !== -1) {
-      print(await sendV2('markdown.set_content', { surfaceId, markdown: args.slice(contentFlag + 1).join(' ') }));
+      // Stop at --title so it isn't swallowed into the content when it comes last.
+      const end = titleFlag > contentFlag ? titleFlag : args.length;
+      print(await sendV2('markdown.set_content', {
+        surfaceId, markdown: args.slice(contentFlag + 1, end).join(' '), title,
+      }));
     } else if (fileFlag !== -1) {
       // Resolve against the terminal's cwd — the main-process cwd differs.
       const filePath = path.resolve(process.cwd(), args[fileFlag + 1] || '');
       print(await sendV2('markdown.load_file', { surfaceId, filePath }));
     } else {
-      console.error('Usage: wmux markdown set <id> --content <text> | --file <path>'); process.exit(1);
+      console.error('Usage: wmux markdown set <id> --content <text> [--title T] | --file <path>'); process.exit(1);
     }
+  } else if (sub === 'get') {
+    // Read a surface's buffer back out — mirrors `read-screen` for terminals.
+    print(await sendV2('markdown.get_content', { surfaceId: args[2] }));
   } else if (sub) {
     // One-shot: `wmux markdown <file>` — create a markdown surface and load the
     // file into it. Relative paths resolve against the caller's cwd.
@@ -253,7 +270,7 @@ async function cmdMarkdown(args: string[]): Promise<void> {
     if (!surfaceId) { console.error('Failed to create markdown surface'); process.exit(1); }
     print(await sendV2('markdown.load_file', { surfaceId, filePath }));
   } else {
-    console.error('Usage: wmux markdown <file>  |  wmux markdown set <id> --content <text> | --file <path>');
+    console.error('Usage: wmux markdown <file>  |  wmux markdown set <id> --content <text> [--title T] | --file <path>  |  wmux markdown get <id>');
     process.exit(1);
   }
 }
@@ -467,6 +484,17 @@ const COMMANDS: Record<string, (args: string[]) => Promise<void> | void> = {
     print(await sendV2('surface.create', { type, ...(colorScheme ? { colorScheme } : {}) }));
   },
   'close-surface': async (args) => print(await sendV2('surface.close', { id: args[1] })),
+  // `rename-surface <id> <title>`, or `rename-surface <title>` from inside a
+  // pane (renames the current surface via WMUX_SURFACE_ID).
+  'rename-surface': async (args) => {
+    let id = args[1];
+    let title = args[2];
+    if (title === undefined && process.env.WMUX_SURFACE_ID) {
+      title = id;
+      id = process.env.WMUX_SURFACE_ID;
+    }
+    print(await sendV2('surface.rename', { id, title }));
+  },
   'focus-surface': async (args) => print(await sendV2('surface.focus', { id: args[1] })),
   'list-surfaces': async (args) => print(await sendV2('surface.list', { paneId: getFlag(args, '--pane') })),
   'set-color-scheme': cmdSetColorScheme,
@@ -615,6 +643,7 @@ Remote:     ssh [ssh options] <user@host> [--title T]   (remote terminal in a ne
 Global:     --remote host[:port] --token <T>   (drive a REMOTE wmux through an SSH tunnel;
             env equivalents: WMUX_REMOTE, WMUX_REMOTE_TOKEN)
 Surface:    new-surface [--type T] [--color-scheme NAME], close-surface, focus-surface, list-surfaces
+            rename-surface [surfaceId] <title>   (renames the current surface when run inside a pane)
             set-color-scheme [surfaceId] <scheme>, clear-color-scheme [surfaceId], list-themes
 Pane:       split [--down] [--type T] [--color-scheme NAME], close-pane, focus-pane, zoom-pane, list-panes, tree
             pane new|close|focus|list   (verb form, mirrors issue #4 example)

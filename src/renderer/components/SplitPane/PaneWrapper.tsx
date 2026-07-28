@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { PaneId, SplitNode, SurfaceId, WorkspaceId, QuickLaunchProfile, ShellInfo } from '../../../shared/types';
-import { findLeaf, removeLeaf, splitNode } from '../../store/split-utils';
+import { findLeaf, splitNode } from '../../store/split-utils';
 import TerminalPane from '../Terminal/TerminalPane';
 import BrowserPane from '../Browser/BrowserPane';
 import MarkdownPane from '../Markdown/MarkdownPane';
@@ -48,7 +48,10 @@ export default function PaneWrapper({
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
   const addSurface = useStore((s) => s.addSurface);
   const updateSurface = useStore((s) => s.updateSurface);
-  const closeSurface = useStore((s) => s.closeSurface);
+  const requestCloseSurface = useStore((s) => s.requestCloseSurface);
+  const duplicateSurface = useStore((s) => s.duplicateSurface);
+  const closeOtherSurfaces = useStore((s) => s.closeOtherSurfaces);
+  const closeSurfacesToRight = useStore((s) => s.closeSurfacesToRight);
   const selectSurface = useStore((s) => s.selectSurface);
   const moveSurface = useStore((s) => s.moveSurface);
   const splitAndMoveSurface = useStore((s) => s.splitAndMoveSurface);
@@ -236,7 +239,44 @@ export default function PaneWrapper({
               }}
             />
           )}
-          {surface.type === 'markdown' && <MarkdownPane surfaceId={surface.id} content={surface.markdownContent} />}
+          {surface.type === 'markdown' && (
+            <MarkdownPane
+              surfaceId={surface.id}
+              content={surface.markdownContent}
+              filePath={surface.markdownFilePath}
+              viewMode={surface.markdownViewMode}
+              cwd={workspace?.cwd}
+              fileMtime={surface.markdownFileMtime}
+              dirty={surface.markdownDirty}
+              // All of these persist onto the surface (issue #116) so they
+              // survive the remount that a split-tree restructure causes,
+              // exactly like markdownContent itself.
+              onViewModeChange={(mode) =>
+                updateSurface(workspaceId, paneId, surface.id, { markdownViewMode: mode })}
+              onFileLoaded={({ content, filePath, fileName, mtimeMs }) =>
+                updateSurface(workspaceId, paneId, surface.id, {
+                  markdownContent: content,
+                  markdownFilePath: filePath,
+                  markdownFileName: fileName,
+                  markdownFileMtime: mtimeMs,
+                  // A load from disk IS what is on disk, so the buffer is clean
+                  // again — this is also what makes "Discard changes" work.
+                  markdownDirty: false,
+                })}
+              onEdit={(next) =>
+                updateSurface(workspaceId, paneId, surface.id, {
+                  markdownContent: next,
+                  markdownDirty: true,
+                })}
+              onSaved={({ filePath, fileName, mtimeMs }) =>
+                updateSurface(workspaceId, paneId, surface.id, {
+                  markdownFilePath: filePath,
+                  markdownFileName: fileName,
+                  markdownFileMtime: mtimeMs,
+                  markdownDirty: false,
+                })}
+            />
+          )}
           {surface.type === 'diff' && <DiffPane surfaceId={surface.id} cwd={workspace?.cwd} />}
         </div>
       );
@@ -343,10 +383,31 @@ export default function PaneWrapper({
 
   const handleCloseSurface = (surfaceId: SurfaceId) => {
     if (activeWorkspaceId) {
-      // PTY teardown now lives in the store's closeSurface action (issue #65), so
+      // PTY teardown lives in the store's closeSurface action (issue #65), so
       // every close route — this tab-× button, Ctrl+W, and `wmux close-surface` —
-      // reaps the shell through the same chokepoint.
-      closeSurface(activeWorkspaceId, paneId, surfaceId);
+      // reaps the shell through the same chokepoint. User gestures go through
+      // requestCloseSurface first, which stops to confirm when the tab holds
+      // unsaved markdown edits (issue #116, F3).
+      requestCloseSurface(activeWorkspaceId, paneId, surfaceId);
+    }
+  };
+
+  const handleDuplicateSurface = () => {
+    const active = surfaces[activeSurfaceIndex];
+    if (activeWorkspaceId && active) {
+      duplicateSurface(activeWorkspaceId, paneId, active.id);
+    }
+  };
+
+  const handleCloseOtherSurfaces = (surfaceId: SurfaceId) => {
+    if (activeWorkspaceId) {
+      closeOtherSurfaces(activeWorkspaceId, paneId, surfaceId);
+    }
+  };
+
+  const handleCloseSurfacesToRight = (surfaceId: SurfaceId) => {
+    if (activeWorkspaceId) {
+      closeSurfacesToRight(activeWorkspaceId, paneId, surfaceId);
     }
   };
 
@@ -374,19 +435,11 @@ export default function PaneWrapper({
 
   const handleClosePane = () => {
     if (!activeWorkspaceId) return;
-    // Kill all PTYs in this pane first
-    for (const surface of surfaces) {
-      if (surface.type === 'terminal') {
-        window.wmux?.pty?.kill(surface.id);
-      }
-    }
-    // Remove the pane atomically (not surface-by-surface, which corrupts state)
-    const { workspaces, updateSplitTree } = useStore.getState();
-    const ws = workspaces.find(w => w.id === activeWorkspaceId);
-    if (ws) {
-      const newTree = removeLeaf(ws.splitTree, paneId);
-      if (newTree) updateSplitTree(activeWorkspaceId, newTree);
-    }
+    // Reaping and tree surgery both live in the store action now — this button,
+    // `wmux close-pane` and closeSurface's last-tab path had each grown their own
+    // copy, and all three killed the shells before discovering they were not
+    // going to remove anything (a one-pane workspace). See surface-slice.closePane.
+    useStore.getState().closePane(activeWorkspaceId, paneId);
   };
 
   const getSourceLeaf = (sourcePaneId: PaneId) => {
@@ -525,6 +578,9 @@ export default function PaneWrapper({
         activeSurfaceIndex={activeSurfaceIndex}
         onSelect={handleSelectSurface}
         onClose={handleCloseSurface}
+        onDuplicate={handleDuplicateSurface}
+        onCloseOthers={handleCloseOtherSurfaces}
+        onCloseToRight={handleCloseSurfacesToRight}
         onNew={handleNewSurface}
         onNewTyped={handleNewSurfaceTyped}
         shells={availableShells}

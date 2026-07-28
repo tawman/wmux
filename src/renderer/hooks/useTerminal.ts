@@ -13,6 +13,8 @@ import { SplitNode, ThemeConfig } from '../../shared/types';
 import { UserColorScheme } from '../store/settings-slice';
 import { openInWmuxBrowser } from '../utils/open-in-browser';
 import { attachVisibleRenderer, RendererHandle } from '../utils/terminal-renderer';
+import { trimTrailingWhitespace } from '../utils/copy-text';
+import { handleShiftEnter, isShiftEnter } from './terminal-keys';
 import '@xterm/xterm/css/xterm.css';
 
 declare global {
@@ -653,7 +655,9 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     // Attach custom key handler for Ctrl+C and Ctrl+V (image paste)
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
-        const selection = terminal.getSelection();
+        // ConPTY pads lines to full width with real spaces — trim them or
+        // pasted blocks carry ragged trailing whitespace (issue #102).
+        const selection = trimTrailingWhitespace(terminal.getSelection());
         if (selection) {
           navigator.clipboard.writeText(selection).catch(() => {});
           terminal.clearSelection();
@@ -688,6 +692,14 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
           }
         })();
         return false; // Prevent default — we handle paste ourselves
+      }
+      // Shift+Enter → newline for TUI apps (Claude Code, etc). See
+      // ./terminal-keys for why this cancels the event as well as returning
+      // false (issue #119). Routed through terminal.input() (→ onData) rather
+      // than pty.write so broadcast-input mode (issue #64) fans the newline out
+      // like any other key.
+      if (isShiftEnter(event)) {
+        return handleShiftEnter(event, (data) => terminal.input(data, true));
       }
       return true;
     });

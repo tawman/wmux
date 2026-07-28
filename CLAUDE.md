@@ -119,9 +119,8 @@ docs/             Planning docs
 | `claude-context.ts` | Auto-injects wmux instructions into `~/.claude/CLAUDE.md`, configures hooks, installs wmux-orchestrator plugin |
 | `claude-observer.ts` | Monitors Claude Code activity for sidebar display |
 | `session-persistence.ts` | Auto-save/restore window state |
-| `git-poller.ts` | Git branch/dirty status polling |
-| `pr-poller.ts` | GitHub PR status polling |
 | `port-scanner.ts` | Active port detection for running dev servers |
+| `shell-context-menu.ts` | "Open in wmux" Explorer verb — HKCU shell keys for Directory/Directory\Background/Drive, plus `directoryFromArgv` for the launch path. Win11 places it under "Show more options"; the modern menu needs a signed MSIX, which unsigned wmux cannot ship |
 | `theme-loader.ts` | Theme loading |
 | `config-loader.ts` | WT/Ghostty config import |
 | `shell-detector.ts` | Available shells detection |
@@ -161,7 +160,8 @@ docs/             Planning docs
 
 ```
 pty:      create, write, resize, kill, has, onData, onExit
-system:   platform, getShells, openExternal, toggleDevTools
+system:   platform, getShells, openExternal, toggleDevTools, pickFolder,
+          getContextMenu, setContextMenu   # "Open in wmux" Explorer verb (HKCU)
 config:   getTheme, getThemeList, importWindowsTerminal, importGhostty
 metadata: onUpdate
 notification: fire, onFocusSurface
@@ -262,6 +262,7 @@ cp resources/icon.png ../wmux-release-staging/resources/
 rm -rf ../wmux-release-staging/resources/themes && cp -r resources/themes ../wmux-release-staging/resources/themes
 rm -rf ../wmux-release-staging/resources/sounds && cp -r resources/sounds ../wmux-release-staging/resources/sounds
 mkdir -p ../wmux-release-staging/resources/cli && cp dist/cli/wmux.js ../wmux-release-staging/resources/cli/wmux.js
+cp dist/cli/wmux-hook.js ../wmux-release-staging/resources/cli/wmux-hook.js   # Claude hooks exec this via bare node — MUST ship outside the asar (missing until 0.29.1 → sidebar stuck on "Running", issue #81)
 rm -rf ../wmux-release-staging/resources/shell-integration && mkdir -p ../wmux-release-staging/resources/shell-integration
 cp -r src/shell-integration/* ../wmux-release-staging/resources/shell-integration/
 rm -rf ../wmux-release-staging/resources/wmux-orchestrator && cp -r resources/wmux-orchestrator ../wmux-release-staging/resources/wmux-orchestrator
@@ -292,9 +293,14 @@ node -e "
 # 9. Create zip
 powershell -NoProfile -Command "Compress-Archive -Path '..\wmux-release-staging\*' -DestinationPath '..\wmux-<VERSION>-win-x64.zip' -CompressionLevel Optimal"
 
-# 9b. Generate latest.yml (REQUIRED — electron-updater 404s on every launch
-# without it; issue #68. The CI workflow does this automatically, but manual
-# releases MUST do it too.)
+# 9b. latest.yml — DO NOT generate one pointing at the zip for a manual
+# release. Installed clients use NsisUpdater: a zip in latest.yml downloads
+# but never installs (endless update loop, issue #96). latest.yml must point
+# at an NSIS setup.exe, which only the CI build produces — so for a full
+# release, prefer tagging and letting CI ship setup.exe + zip + latest.yml.
+# A manual zip-only release simply ships WITHOUT latest.yml (the updater
+# handles its absence gracefully since 0.28; the notify-only checker still
+# surfaces the new version). Legacy snippet kept for reference:
 node -e "
   const crypto = require('crypto'); const fs = require('fs');
   const version = '<VERSION>';
@@ -359,9 +365,9 @@ The pipe server in `index.ts` handles V2 JSON-RPC methods. Most delegate to the 
 - `system.identify`, `system.capabilities`, `system.tree`
 - `workspace.create`, `workspace.close`, `workspace.select`, `workspace.rename`, `workspace.list`
 - `pane.split`, `pane.close`, `pane.focus`, `pane.zoom`, `pane.list`
-- `surface.create`, `surface.close`, `surface.focus`, `surface.list`
+- `surface.create`, `surface.close`, `surface.focus`, `surface.rename`, `surface.list`
 - `surface.send_text`, `surface.send_key`, `surface.read_text`, `surface.trigger_flash`
-- `markdown.set_content`, `markdown.load_file`
+- `markdown.set_content`, `markdown.load_file`, `markdown.get_content`
 - `notification.list`, `notification.clear`
 - `sidebar.set_status`, `sidebar.set_progress`, `sidebar.log`, `sidebar.get_state`
 - `browser.*` (via CDP bridge)
@@ -416,9 +422,13 @@ wmux token                            # on the remote: print its auth token
 wmux --remote host[:port] --token T <any command>   # on the client (through `ssh -L port:127.0.0.1:port`)
                                       # env equivalents: WMUX_REMOTE, WMUX_REMOTE_TOKEN
 
+# Markdown surfaces
+wmux markdown <file> | markdown set <id> --content <text> [--title T] | --file <path>
+wmux markdown get <id>                                 # read a surface's buffer back out
+
 # Surfaces (tabs within a pane)
 wmux new-surface [--type terminal|browser|markdown]
-wmux close-surface | focus-surface | list-surfaces
+wmux close-surface | focus-surface | rename-surface | list-surfaces
 
 # Panes
 wmux split [--down] [--type T] | close-pane | focus-pane | zoom-pane | list-panes | tree
@@ -428,8 +438,8 @@ wmux send <text> | send-key <key> [--ctrl] [--shift] [--alt]
 wmux read-screen [--lines N] [--surface <id>] | trigger-flash
 
 # Browser (CDP)
-wmux browser open <url> | snapshot | click @eN | type @eN <text>
-wmux browser fill @eN <value> | get-text | screenshot | eval <js>
+wmux browser open <url> | snapshot | click eN | type eN <text>
+wmux browser fill eN <value> | get-text | screenshot | eval <js>
 wmux browser back | forward | reload
 
 # Agents
