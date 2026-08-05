@@ -702,6 +702,16 @@ const COMMAND_SPECS = {
     bool: ['--replace-tab'],
   },
 
+  // Agent-to-agent messaging (fork-local, issue #11) — send's payload is free-form
+  a2a: {
+    usage: [
+      'wmux a2a send --to <id> [--from <id>] [--kind <k>] <payload>   (payload parsed as JSON, else string)',
+      'wmux a2a poll [--to <id>] [--peek]                             (drains by default)',
+      'wmux a2a status',
+    ].join('\n'),
+    passthrough: true,
+  },
+
   // Markdown (--content takes free-form text)
   markdown: {
     usage: [
