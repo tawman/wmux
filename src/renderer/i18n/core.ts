@@ -11,6 +11,7 @@
 // partial translation never renders blank.
 
 import { en, type Translation, type TranslationKey } from './locales/en';
+import { es } from './locales/es';
 import { fr } from './locales/fr';
 import { it } from './locales/it';
 import { zh } from './locales/zh';
@@ -20,6 +21,7 @@ import { zh } from './locales/zh';
 // derive from this table, so there is no second list to keep in sync.
 const REGISTRY = [
   { code: 'en', label: 'English', dict: en as Translation },
+  { code: 'es', label: 'Español', dict: es },
   { code: 'fr', label: 'Français', dict: fr },
   { code: 'it', label: 'Italiano', dict: it },
   { code: 'zh', label: '中文', dict: zh },
@@ -43,6 +45,25 @@ export const DICTIONARIES = Object.fromEntries(REGISTRY.map((l) => [l.code, l.di
 /** Translate a key for an explicit language (English → fallback → key chain). */
 export function translate(lang: Language, key: TranslationKey, fallback?: string): string {
   return DICTIONARIES[lang]?.[key] ?? DICTIONARIES.en[key] ?? fallback ?? key;
+}
+
+export type Translator = (key: TranslationKey, fallback?: string) => string;
+
+// One translator per language, kept forever (there are a handful of languages).
+// The identity has to be stable: `useT()`'s result is fed into `useCallback`
+// and `useEffect` dependency arrays across the renderer, and a fresh closure
+// per render invalidates every one of them. That is how the diff pane's 2s
+// poll degenerated into a render-speed loop spawning `git.exe` (issue #141).
+const translators = new Map<Language, Translator>();
+
+/** The translator for `lang` — same function object on every call. */
+export function makeT(lang: Language): Translator {
+  let t = translators.get(lang);
+  if (!t) {
+    t = (key, fallback) => translate(lang, key, fallback);
+    translators.set(lang, t);
+  }
+  return t;
 }
 
 /** Narrow an untrusted value (persisted setting, CLI arg) to a shipped language. */

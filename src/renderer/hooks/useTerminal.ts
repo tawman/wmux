@@ -8,6 +8,7 @@ import { ImageAddon } from '@xterm/addon-image';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { ProgressAddon } from '@xterm/addon-progress';
 import { useStore } from '../store';
+import { useT } from '../i18n';
 import { collectActiveTerminalSurfaceIds } from '../store/split-utils';
 import { SplitNode, ThemeConfig } from '../../shared/types';
 import { UserColorScheme } from '../store/settings-slice';
@@ -15,6 +16,8 @@ import { openInWmuxBrowser } from '../utils/open-in-browser';
 import { attachVisibleRenderer, RendererHandle } from '../utils/terminal-renderer';
 import { trimTrailingWhitespace } from '../utils/copy-text';
 import { handleShiftEnter, isShiftEnter } from './terminal-keys';
+import { applyKeyRemap } from '../key-remaps';
+import { isConEmuSubcommand } from './osc9';
 import '@xterm/xterm/css/xterm.css';
 
 declare global {
@@ -332,6 +335,7 @@ async function fetchTheme(name: string): Promise<ThemeConfig> {
 }
 
 export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = true, colorScheme, startupCommands }: UseTerminalOptions = {}): UseTerminalResult {
+  const t = useT();
   const terminalRef = useRef<HTMLDivElement | null>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -566,6 +570,18 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     // Register OSC notification handlers
     // OSC 9: basic notification (iTerm2 style)
     terminal.parser.registerOscHandler(9, (data) => {
+      // ConEmu/Windows Terminal overload OSC 9 with numeric subcommands —
+      // "9;<cwd>" (our own cmd integration and the standard WT PowerShell
+      // prompt snippet emit this on EVERY prompt redraw) and "4;<state>;<n>"
+      // (progress). Only bare text is an iTerm2 notification (#127).
+      //
+      // Return FALSE, not true: xterm runs OSC handlers newest-first and stops
+      // at the first one returning true. ProgressAddon also registers on OSC 9
+      // but is loaded earlier (above), so this handler always sees the sequence
+      // first — swallowing it with `true` starved the addon and the OSC 9;4
+      // progress bar never fired at all (dead since it shipped in 0.23.0).
+      // Declining passes the sequence down the chain to the addon.
+      if (isConEmuSubcommand(data)) return false;
       window.wmux.notification.fire({
         surfaceId: ptyIdRef.current || '',
         text: data,
@@ -614,7 +630,7 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       lastBellAt = now;
       window.wmux.notification.fire({
         surfaceId: ptyIdRef.current || '',
-        text: 'Terminal bell',
+        text: t('terminal.bell', 'Terminal bell'),
       });
     });
 
@@ -654,6 +670,11 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
 
     // Attach custom key handler for Ctrl+C and Ctrl+V (image paste)
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+      // User key remaps from `~/.wmux/config.toml` win over everything,
+      // including wmux's own shortcuts — that is the point of remapping
+      // (issue #146). Routed through terminal.input (→ onData) rather than
+      // pty.write so broadcast-input fans a remapped key out like any other.
+      if (applyKeyRemap(event, (data) => terminal.input(data, true))) return false;
       if (event.type === 'keydown' && event.ctrlKey && event.key === 'c') {
         // ConPTY pads lines to full width with real spaces — trim them or
         // pasted blocks carry ragged trailing whitespace (issue #102).

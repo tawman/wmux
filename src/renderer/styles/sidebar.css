@@ -256,6 +256,16 @@
   color: #4caf50;
 }
 
+/* "Needs you" — a session parked on a human (issue #128). Deliberately NOT
+   amber: amber already means "working", and the whole value of this state is
+   that it reads differently from the panes that are getting on with it. Violet
+   is unused elsewhere in the sidebar vocabulary, so it cannot be confused with
+   running (amber), done (green) or interrupted (red). */
+.workspace-row__status--blocked {
+  color: #b388ff;
+  font-weight: 600;
+}
+
 .workspace-row__status--interrupted {
   color: #e53935;
 }
@@ -645,6 +655,62 @@
   animation: pulse-dot 1.2s ease-in-out infinite;
   flex-shrink: 0;
 }
+/* Blocked session dot: violet to match the status line, and a slower, wider
+   pulse than the working dot. A working pane's fast flicker says "busy, leave
+   it"; this one says "waiting on you" — different rhythm, different meaning,
+   readable without reading the label. */
+.workspace-row__agent-dot--blocked {
+  background: #b388ff;
+  animation: pulse-blocked-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-blocked-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(1.5); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-row__agent-dot--blocked { animation: none; opacity: 1; }
+}
+.workspace-row__session--blocked .workspace-row__agent-detail {
+  color: #b388ff;
+  opacity: 1;
+}
+/* Answer buttons for a blocked pane (issue #128, the back-channel).
+   Violet, matching the blocked dot and detail text — the whole point of that
+   colour is that "needs you" reads differently from the amber of panes getting
+   on with it, and the thing you click to resolve it belongs to the same signal.
+   They wrap: an agent may declare several answers and the sidebar is narrow. */
+.workspace-row__answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0 4px 0;
+  align-items: center;
+}
+.workspace-row__answer {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(179, 136, 255, 0.45);
+  background: rgba(179, 136, 255, 0.12);
+  color: #d3bcff;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workspace-row__answer:hover:not(:disabled) {
+  background: rgba(179, 136, 255, 0.26);
+  border-color: rgba(179, 136, 255, 0.75);
+  color: #efe6ff;
+}
+.workspace-row__answer:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .workspace-row__agent-name {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -3,9 +3,10 @@ import { v4 as uuid } from 'uuid';
 import { useStore } from './store';
 import { PaneId, SurfaceId, WorkspaceId, WorkspaceInfo, SplitNode } from '../shared/types';
 import SplitContainer from './components/SplitPane/SplitContainer';
-import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface } from './store/split-utils';
+import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface, freezeSurfaceCwds } from './store/split-utils';
 import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from './dev-ports';
 import { aggregateProgress } from './store/progress-slice';
+import { isDiffTabDismissed } from './store/surface-slice';
 import Sidebar from './components/Sidebar/Sidebar';
 import Titlebar from './components/Titlebar/Titlebar';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -18,6 +19,7 @@ import BrowserPane from './components/Browser/BrowserPane';
 import Tutorial from './components/Tutorial/Tutorial';
 import SplitPreviewOverlay from './components/SplitPane/SplitPreviewOverlay';
 import { initPipeBridge } from './pipe-bridge';
+import { setKeyRemaps } from './key-remaps';
 import { useUiTheme } from './hooks/useUiTheme';
 import { useUiMode } from './hooks/useUiMode';
 import type {
@@ -27,6 +29,8 @@ import type {
   SurfaceDragPreviewTarget,
 } from './components/SplitPane/drag-preview-types';
 import { buildSurfaceDragPreview } from './components/SplitPane/surface-drag-preview';
+import { useT } from './i18n';
+import type { TranslationKey } from './i18n';
 
 const DEFAULT_SIDEBAR_WIDTH = 240;
 
@@ -96,11 +100,64 @@ function applyUserConfigBrowser(browser: any): void {
 }
 
 type StoreAction = (...args: any[]) => void;
+type T = (key: TranslationKey, fallback?: string) => string;
 type MetaDeps = {
   updateWorkspaceMetadata: StoreAction;
   addNotification: StoreAction;
   runningStartTimes: React.MutableRefObject<Record<string, number>>;
+  t: T;
 };
+
+type SetWidth = (width: number) => void;
+
+/**
+ * Rehydrate from the rolling auto-save (the file main writes every 30s + on quit).
+ *
+ * `'fresh'` is main saying "this window was opened during the run — come up
+ * empty". It is distinct from `'none'` ("nothing saved for you") precisely
+ * because the caller must NOT fall through to a named session in that case:
+ * doing so cloned the session's workspace, pane and surface ids into a second
+ * window, and PTY id is surface id, so the clone re-attached to live PTYs and
+ * every id-based CLI lookup had two equally valid answers (issue #143).
+ */
+async function restoreAutoSaved(t: T, setWidth: SetWidth): Promise<'restored' | 'fresh' | 'none'> {
+  try {
+    const autoSaved = await window.wmux?.session?.loadAuto?.();
+    if (autoSaved && Array.isArray(autoSaved.workspaces) && autoSaved.workspaces.length > 0) {
+      useStore.getState().replaceAllWorkspaces(autoSaved.workspaces, autoSaved.activeIndex, t);
+      if (autoSaved.sidebarWidth) setWidth(autoSaved.sidebarWidth);
+      return 'restored';
+    }
+    return (autoSaved as { fresh?: boolean } | null | undefined)?.fresh ? 'fresh' : 'none';
+  } catch {
+    return 'none';
+  }
+}
+
+/**
+ * Fall back to the most recent manually-saved session. Returns whether it
+ * restored one.
+ *
+ * This is also the post-update path (the version change clears the auto-session
+ * and leaves an "Auto-backup vX" named session behind), so it has to restore
+ * exactly what the Sessions menu's Load does — including terminalPrefs, which
+ * it used to skip (issue #145).
+ */
+async function restoreNamedSession(t: T, setWidth: SetWidth): Promise<boolean> {
+  try {
+    const sessions = await window.wmux?.session?.list();
+    const name = sessions?.[0]?.name;
+    if (!name) return false;
+    const session = await window.wmux?.session?.load(name);
+    if (!session) return false;
+    useStore.getState().replaceAllWorkspaces(session.workspaces, undefined, t);
+    if (session.sidebarWidth) setWidth(session.sidebarWidth);
+    if (session.terminalPrefs) useStore.getState().setTerminalPrefs(session.terminalPrefs);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function fireNotification(
   surfaceId: string,
@@ -153,12 +210,16 @@ function markSessionIdleOnStop(
 function maybeAutoOpenDiffTab(tool: string, ownerWs: WorkspaceInfo): void {
   const state = useStore.getState();
   if ((tool !== 'Edit' && tool !== 'Write') || !state.workspacePrefs.autoOpenDiffTab) return;
+  // A diff tab the user closed stays closed (issue #141). Without this, every
+  // Edit/Write put it back minutes later with no user action — and on a large
+  // repo its polling is what made typing lag, so "close it" was not a fix.
+  if (isDiffTabDismissed(ownerWs.id)) return;
   const bottomPaneId = findBottomPane(ownerWs.splitTree);
   if (!bottomPaneId) return;
   const bottomLeaf = findLeafFromTree(ownerWs.splitTree, bottomPaneId);
   // Only add diff tab if bottom pane doesn't already have one
   if (bottomLeaf && !bottomLeaf.surfaces.some(s => s.type === 'diff')) {
-    state.addSurface(ownerWs.id, bottomPaneId, 'diff');
+    state.addSurface(ownerWs.id, bottomPaneId, 'diff', { auto: true });
   }
 }
 
@@ -186,8 +247,8 @@ function handlePortsUpdate(cmd: any, updateWorkspaceMetadata: StoreAction): void
 }
 
 /** `wmux notify <text>` — works even outside a pane (falls back to active workspace). */
-function handleNotifyCommand(cmd: any, addNotification: StoreAction): void {
-  const text = (cmd.args || []).join(' ').trim() || 'Notification';
+function handleNotifyCommand(cmd: any, addNotification: StoreAction, t: T): void {
+  const text = (cmd.args || []).join(' ').trim() || t('app.notificationDefault', 'Notification');
   const ws = workspaceForSurface(cmd.surfaceId);
   const wsId = ws?.id || useStore.getState().activeWorkspaceId;
   fireNotification(cmd.surfaceId, wsId, text, addNotification);
@@ -217,8 +278,8 @@ function applyShellState(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): void {
     ? `${Math.floor(totalSeconds / 60)}m${totalSeconds % 60}s`
     : `${totalSeconds}s`;
   const msg = newState === 'interrupted'
-    ? `Interrupted in ${ws.title} (${duration})`
-    : `Finished in ${ws.title} (${duration})`;
+    ? deps.t('app.interruptedIn', 'Interrupted in {workspace} ({duration})').replace('{workspace}', ws.title).replace('{duration}', duration)
+    : deps.t('app.finishedIn', 'Finished in {workspace} ({duration})').replace('{workspace}', ws.title).replace('{duration}', duration);
   fireNotification(cmd.surfaceId, ws.id, msg, deps.addNotification);
 }
 
@@ -266,7 +327,7 @@ function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): voi
 }
 
 /** Claude Code Notification (needs input) / Stop (turn finished) hook events. */
-function handleAgentLifecycleEvent(event: any, addNotification: StoreAction): void {
+function handleAgentLifecycleEvent(event: any, addNotification: StoreAction, t: T): void {
   const state = useStore.getState();
   const prefs = state.notificationPrefs;
   if (event.event === 'Notification' && prefs.agentInputNotify === false) return;
@@ -279,9 +340,11 @@ function handleAgentLifecycleEvent(event: any, addNotification: StoreAction): vo
 
   let text: string;
   if (event.event === 'Notification') {
-    text = event.message || 'Claude Code needs your input';
+    text = event.message || t('app.claudeNeedsInput', 'Claude Code needs your input');
   } else {
-    text = wsTitle ? `Claude Code finished in ${wsTitle}` : 'Claude Code finished';
+    text = wsTitle
+      ? t('app.claudeFinishedIn', 'Claude Code finished in {workspace}').replace('{workspace}', wsTitle)
+      : t('app.claudeFinished', 'Claude Code finished');
   }
   fireNotification(sid, wsId, text, addNotification);
 }
@@ -371,6 +434,7 @@ export default function App() {
 
   useUiTheme();
   useUiMode();
+  const t = useT();
 
   const [focusedPaneId, setFocusedPaneId] = useState<PaneId | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -398,6 +462,8 @@ export default function App() {
   const [hookActivity, setHookActivity] = useState<Record<string, { lastTool: string; toolCount: number; lastSeen: number }>>({});
   // Per-surface Claude activity (parsed from terminal output)
   const [claudeActivity, setClaudeActivity] = useState<Record<string, any>>({});
+  // surfaceId → declared agent state (blocked / working / idle), issue #128.
+  const [agentStates, setAgentStates] = useState<Record<string, any>>({});
   // Track when each workspace entered "running" state (for notification threshold)
   const runningStartTimes = useRef<Record<string, number>>({});
   // Browser URL tracking is now per-workspace via WorkspaceInfo.browserUrl
@@ -428,6 +494,12 @@ export default function App() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [shortcuts, commandPaletteOpen]);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  // Session writes read the width through this ref, not the state value.
+  // As a dependency, `sidebarWidth` re-subscribed the auto-save listener and
+  // rebuilt the save callback on every intermediate value of a drag; the ref
+  // keeps those stable, so only the settled width matters (issue 07).
+  const sidebarWidthRef = useRef(sidebarWidth);
+  useEffect(() => { sidebarWidthRef.current = sidebarWidth; }, [sidebarWidth]);
 
   // Open tutorial on first launch, unless the welcome screen is disabled in
   // Settings (issue #22). The "seen" flag still prevents re-showing it.
@@ -450,31 +522,15 @@ export default function App() {
   // restart users with no manually-saved snapshot lost their workspaces.
   useEffect(() => {
     (async () => {
-      try {
-        const autoSaved = await window.wmux?.session?.loadAuto?.();
-        if (autoSaved && Array.isArray(autoSaved.workspaces) && autoSaved.workspaces.length > 0) {
-          const { replaceAllWorkspaces } = useStore.getState();
-          replaceAllWorkspaces(autoSaved.workspaces, autoSaved.activeIndex);
-          if (autoSaved.sidebarWidth) setSidebarWidth(autoSaved.sidebarWidth);
-          return;
-        }
-      } catch {}
-      try {
-        const sessions = await window.wmux?.session?.list();
-        if (sessions && sessions.length > 0) {
-          const session = await window.wmux?.session?.load(sessions[0].name);
-          if (session) {
-            const { replaceAllWorkspaces } = useStore.getState();
-            replaceAllWorkspaces(session.workspaces);
-            if (session.sidebarWidth) setSidebarWidth(session.sidebarWidth);
-            return;
-          }
-        }
-      } catch {}
-      // No saved session — create default workspace
+      const outcome = await restoreAutoSaved(t, setSidebarWidth);
+      if (outcome === 'restored') return;
+      // 'fresh' means main deliberately wants this window empty — a named
+      // session must not be cloned into it (issue #143).
+      if (outcome !== 'fresh' && await restoreNamedSession(t, setSidebarWidth)) return;
+      // Nothing to restore — create the default workspace.
       if (useStore.getState().workspaces.length === 0) {
         createWorkspace({
-          title: 'Session 1',
+          title: t('app.firstSessionTitle', 'Session 1'),
           splitTree: buildDefaultSplitTree(),
         });
       }
@@ -512,6 +568,9 @@ export default function App() {
       const state = useStore.getState();
       applyUserConfigTerminal(state, result?.terminal);
       applyUserConfigBrowser(result?.browser);
+      // `[keys]` remaps (issue #146) — main has already parsed and validated
+      // them, so this is a straight hand-off to the terminal key handler.
+      setKeyRemaps(result?.keys);
 
       // App UI theme override (issue #67): `[appearance] ui-theme = "..."`.
       const uiTheme = result?.appearance?.uiTheme;
@@ -562,12 +621,12 @@ export default function App() {
   // Listen for real-time metadata updates from shell integration (pipe server → IPC → here)
   useEffect(() => {
     if (!window.wmux?.metadata?.onUpdate) return;
-    const deps: MetaDeps = { updateWorkspaceMetadata, addNotification, runningStartTimes };
+    const deps: MetaDeps = { updateWorkspaceMetadata, addNotification, runningStartTimes, t };
     const unsub = window.wmux.metadata.onUpdate((cmd: any) => {
       if (!cmd) return;
       // ports_update and notify have no (required) surfaceId — handle globally.
       if (cmd.command === 'ports_update') { handlePortsUpdate(cmd, updateWorkspaceMetadata); return; }
-      if (cmd.command === 'notify') { handleNotifyCommand(cmd, addNotification); return; }
+      if (cmd.command === 'notify') { handleNotifyCommand(cmd, addNotification, t); return; }
       // set_workspace_status is keyed on workspaceId (not surfaceId) — a
       // coordinator setting a named workspace's status via `wmux set-status
       // --workspace`. Handle before the surfaceId guard below.
@@ -597,7 +656,7 @@ export default function App() {
       // Agent lifecycle (issue #53): Notification = agent needs input/permission,
       // Stop = agent finished its turn. These have no `tool`, so handle first.
       if (event?.event === 'Notification' || event?.event === 'Stop') {
-        handleAgentLifecycleEvent(event, addNotification);
+        handleAgentLifecycleEvent(event, addNotification, t);
         if (event.event === 'Stop') markSessionIdleOnStop(event.surfaceId, setHookActivity);
         return;
       }
@@ -648,6 +707,18 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Declared agent state pushed by the agent itself (issue #128). Unlike the
+  // scraped/heuristic signals above this is authoritative, so it is kept in its
+  // own map and given precedence in claude-session-view.
+  useEffect(() => {
+    if (!window.wmux?.agentState?.onUpdate) return;
+    const unsub = window.wmux.agentState.onUpdate((data: any) => {
+      if (!data?.surfaceId) return;
+      setAgentStates(prev => ({ ...prev, [data.surfaceId]: data }));
+    });
+    return unsub;
+  }, []);
+
   // ── Windows taskbar progress (OSC 9;4) ──────────────────────────────────
   // Fold every surface's progress into one value for this window's taskbar
   // button — the same convention Windows Terminal follows for the sequence.
@@ -674,7 +745,7 @@ export default function App() {
         version: 1,
         windows: [{
           bounds: { x: 0, y: 0, width: 0, height: 0 }, // main process fills real bounds
-          sidebarWidth,
+          sidebarWidth: sidebarWidthRef.current,
           activeWorkspaceId: state.activeWorkspaceId,
           workspaces: state.workspaces.map(ws => ({
             id: ws.id,
@@ -683,7 +754,10 @@ export default function App() {
             pinned: ws.pinned,
             shell: ws.shell,
             cwd: ws.cwd, // issue #20 — restore so new terminals reopen in the workspace folder
-            splitTree: ws.splitTree,
+            // Per-tab directories, frozen at save time (issue #134): ws.cwd above
+            // is a single value for the whole workspace, so on its own it sends
+            // every restored terminal to the same place.
+            splitTree: freezeSurfaceCwds(ws.splitTree),
             browserUrl: ws.browserUrl,
             browserWidth: ws.browserWidth,
           })),
@@ -692,7 +766,7 @@ export default function App() {
       window.wmux.session.pushAutoSave(data);
     });
     return unsub;
-  }, [sidebarWidth]);
+  }, []);
 
   // Auto-focus first pane whenever the active workspace changes or gains its first pane
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
@@ -728,11 +802,11 @@ export default function App() {
   const handleCreateWorkspace = useCallback(() => {
     const wsCount = useStore.getState().workspaces.length;
     const newId = createWorkspace({
-      title: `Session ${wsCount + 1}`,
+      title: t('app.sessionTitle', 'Session {n}').replace('{n}', String(wsCount + 1)),
       splitTree: buildDefaultSplitTree(),
     });
     selectWorkspace(newId);
-  }, [createWorkspace, selectWorkspace]);
+  }, [createWorkspace, selectWorkspace, t]);
 
   const handleSaveSession = useCallback(async (name: string) => {
     const state = useStore.getState();
@@ -742,27 +816,35 @@ export default function App() {
       workspaces: state.workspaces.map(ws => ({
         title: ws.title,
         customColor: ws.customColor,
+        // Pinning is part of the layout the user arranged — the auto-save has
+        // always kept it, so a named save must too (issue #145).
+        pinned: ws.pinned,
         shell: ws.shell,
         cwd: ws.cwd || '',
-        splitTree: ws.splitTree,
+        // See the auto-save path below — a named session is the case #134
+        // reported, where losing a worktree's drive makes the session
+        // unidentifiable after a restore.
+        splitTree: freezeSurfaceCwds(ws.splitTree),
         browserUrl: ws.browserUrl || '',
         browserWidth: ws.browserWidth,
       })),
-      sidebarWidth,
+      sidebarWidth: sidebarWidthRef.current,
       terminalPrefs: { ...state.terminalPrefs },
     };
     await window.wmux?.session?.save(session);
-    window.wmux?.notification?.fire({ surfaceId: '', text: `Session "${name}" saved`, title: 'wmux' });
-  }, [sidebarWidth]);
+    window.wmux?.notification?.fire({ surfaceId: '', text: t('app.sessionSaved', 'Session "{name}" saved').replace('{name}', name), title: 'wmux' });
+    // sidebarWidth is read through sidebarWidthRef (PR #131), so it is
+    // deliberately not a dependency — a drag must not rebuild this callback.
+  }, [t]);
 
   const handleLoadSession = useCallback(async (name: string) => {
     const session = await window.wmux?.session?.load(name);
     if (!session) return;
     const { replaceAllWorkspaces, setTerminalPrefs } = useStore.getState();
-    replaceAllWorkspaces(session.workspaces);
+    replaceAllWorkspaces(session.workspaces, undefined, t);
     if (session.sidebarWidth) setSidebarWidth(session.sidebarWidth);
     if (session.terminalPrefs) setTerminalPrefs(session.terminalPrefs);
-  }, []);
+  }, [t]);
 
   const handleUpdateMetadata = useCallback(
     (id: WorkspaceId, partial: Partial<WorkspaceInfo>) => {
@@ -966,6 +1048,7 @@ export default function App() {
             onUpdateMetadata={handleUpdateMetadata}
             hookActivity={hookActivity}
             claudeActivity={claudeActivity}
+            agentStates={agentStates}
             onSaveSession={handleSaveSession}
             onLoadSession={handleLoadSession}
             onCollapse={toggleSidebar}
@@ -996,7 +1079,7 @@ export default function App() {
               document.addEventListener('mousemove', onMove);
               document.addEventListener('mouseup', onUp);
             }}
-            title="Expand sidebar (Ctrl+B)"
+            title={t('app.expandSidebar', 'Expand sidebar (Ctrl+B)')}
           >
             <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
               <path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/>
@@ -1117,7 +1200,7 @@ export default function App() {
                 }}
                 onMouseEnter={(e) => { (e.target as HTMLElement).style.color = '#fff'; (e.target as HTMLElement).style.background = 'rgba(220,50,50,0.7)'; }}
                 onMouseLeave={(e) => { (e.target as HTMLElement).style.color = '#999'; (e.target as HTMLElement).style.background = 'rgba(0,0,0,0.5)'; }}
-                title="Close browser panel"
+                title={t('app.closeBrowserPanel', 'Close browser panel')}
               >×</button>
               {/* Per-workspace browser — all stay mounted, only active visible */}
               {workspaces.map((ws) => (
@@ -1154,8 +1237,8 @@ export default function App() {
       <ConfirmCloseSurfaceDialog />
 
       {broadcastInputActive && (
-        <div className="broadcast-input-banner" title="Typed input is sent to every terminal pane in this workspace">
-          Broadcast input ON — typing goes to all panes (Ctrl+Alt+B to stop)
+        <div className="broadcast-input-banner" title={t('app.broadcastInputTooltip', 'Typed input is sent to every terminal pane in this workspace')}>
+          {t('app.broadcastInputBanner', 'Broadcast input ON — typing goes to all panes (Ctrl+Alt+B to stop)')}
         </div>
       )}
     </div>

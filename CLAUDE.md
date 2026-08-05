@@ -116,8 +116,12 @@ docs/             Planning docs
 | `agent-manager.ts` | Agent PTY spawning, round-robin distribution across panes |
 | `window-manager.ts` | Electron BrowserWindow creation/management |
 | `ipc-handlers.ts` | All IPC channel handlers |
-| `claude-context.ts` | Auto-injects wmux instructions into `~/.claude/CLAUDE.md`, configures hooks, installs wmux-orchestrator plugin |
+| `claude-context.ts` | Injects wmux instructions into `~/.claude/CLAUDE.md`, configures hooks, installs wmux-orchestrator plugin — **and the inverse of each**, since 0.40.0 |
+| `agent-integration.ts` | Consent gate for every write outside `%APPDATA%\wmux` (issue #132). Asks on first launch, stores `unset`/`granted`/`declined` in wmux's own settings.json, and reconciles `~/.claude` + `~/.config/opencode` to match. Nothing in `claude-context.ts` or `opencode-context.ts` may be called directly from startup any more — route it through here |
 | `claude-observer.ts` | Monitors Claude Code activity for sidebar display |
+| `agent-state.ts` | Declared agent run state — blocked/working/idle, run refcount, `seq` dedupe, metadata TTL (issue #128). Also the back-channel: declared `choices` + `answerAgent`. **Answering never clears `blocked`** — the agent must confirm, or a mis-declared key silently stops a stuck pane asking for help |
+| `agent-state-rpc.ts` | `pane.report_agent` & friends, routed off the main V2 switch |
+| `agent-hook-bridge.ts` | Claude Code hooks → declared state, so it works with no plugin to install |
 | `session-persistence.ts` | Auto-save/restore window state |
 | `port-scanner.ts` | Active port detection for running dev servers |
 | `shell-context-menu.ts` | "Open in wmux" Explorer verb — HKCU shell keys for Directory/Directory\Background/Drive, plus `directoryFromArgv` for the launch path. Win11 places it under "Show more options"; the modern menu needs a signed MSIX, which unsigned wmux cannot ship |
@@ -170,6 +174,7 @@ agent:    list, status, onUpdate
 clipboard: pasteImage
 hook:     onEvent
 claudeActivity: onUpdate
+agentState: onUpdate   # declared blocked/working/idle (issue #128)
 session:  save, load, list, delete
 cdp:      attach, detach
 window:   create, close, focus, list, minimize, maximize, isMaximized
@@ -372,13 +377,15 @@ The pipe server in `index.ts` handles V2 JSON-RPC methods. Most delegate to the 
 - `sidebar.set_status`, `sidebar.set_progress`, `sidebar.log`, `sidebar.get_state`
 - `browser.*` (via CDP bridge)
 - `agent.spawn`, `agent.spawn_batch`, `agent.status`, `agent.list`, `agent.kill`
+- `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.release_agent`, `pane.agent_state`
+- `pane.answer_agent` — the back-channel (issue #128). The only non-`report_*` method: it WRITES into a pane's PTY. Guarded — refuses unless the pane is currently `blocked`, and only ever sends a payload the agent itself declared
 - `hook.event`, `diff.refresh`
 
 ---
 
 ## wmux-orchestrator Plugin
 
-Claude Code plugin bundled in `resources/wmux-orchestrator/`. Auto-installed into `~/.claude/plugins/cache/` on startup by `ensureOrchestratorPlugin()` in `claude-context.ts`. Also published standalone: `github.com/amirlehmam/wmux-orchestrator`.
+Claude Code plugin bundled in `resources/wmux-orchestrator/`. Installed into `~/.claude/plugins/cache/` on startup by `ensureOrchestratorPlugin()` in `claude-context.ts` — but only when the user has granted the `orchestrator` feature (issue #132); `agent-integration.ts` owns that call. Also published standalone: `github.com/amirlehmam/wmux-orchestrator`.
 
 **What it does:** Decomposes complex dev tasks into parallel Claude Code agents coordinated through dependency-aware waves with automated review. With wmux: each agent in its own visible terminal pane. Without wmux: falls back to native subagents.
 
@@ -442,6 +449,18 @@ wmux browser open <url> | snapshot | click eN | type eN <text>
 wmux browser fill eN <value> | get-text | screenshot | eval <js>
 wmux browser back | forward | reload
 
+# Declared agent state (issue #128) — blocked / working / idle, no screen scraping.
+# Surface defaults to $WMUX_SURFACE_ID, so an agent inside a pane needs no id.
+wmux report-agent --blocked "permission: Bash"   # parked on a human
+wmux report-agent --blocked "Run it?" --choices '[{"id":"y","label":"Yes","key":"1"}]'
+wmux answer-agent --surface <id> --choice y      # reply to ANOTHER pane, from yours
+wmux report-agent --unblocked                    # the human answered
+wmux report-agent --run-start | --run-end        # refcount, so nested subagents nest
+wmux report-agent --run-depth N [--seq N]        # absolute depth; --seq drops replays
+wmux report-metadata [--model M] [--tokens T] [--context-pct N] [--ttl ms]
+wmux report-session <id> | release-agent
+wmux agent-state [--surface <id>]                # no --surface → all panes + blocked list
+
 # Agents
 wmux agent spawn [--cmd C] [--label L] [--cwd D] [--pane P] [--replace-tab]
 wmux agent spawn-batch --json '[...]' [--strategy distribute|stack|split]
@@ -471,7 +490,7 @@ Notify:  notification:fire/list/clear/jump
 Agent:   agent:spawn/spawn-batch/status/list/kill/update
 CDP:     cdp:attach/detach
 Session: session:save-named/load-named/list-named/delete-named
-Meta:    metadata:update, hook:event, claude:activity
+Meta:    metadata:update, hook:event, claude:activity, agent:state
 ```
 
 ---
