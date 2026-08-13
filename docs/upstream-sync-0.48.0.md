@@ -65,9 +65,19 @@
 - Conflicts: `package.json` / `package-lock.json` version fields only → `0.48.0-local.1`.
 - `CLAUDE.md` and `src/main/index.ts` auto-merged cleanly; the fork-only "Fork Build on
   production/local" section and the fork's `index.ts` customisations are intact.
-- No fork-local follow-up needed: `scripts/pack-local.sh` already copied
-  `resources/opencode-plugin` (line 56), so upstream's new packaging requirement was
-  satisfied before it arrived.
+- Upstream's new packaging requirement arrived already satisfied: `scripts/pack-local.sh`
+  copied `resources/opencode-plugin` before this sync.
+- **Fork-local packaging bug found and fixed while verifying the staged build** —
+  `scripts/pack-local.sh` copied `dist/cli/wmux.js` but never `dist/cli/wmux-hook.js`.
+  Packaged builds resolve that script at `resourcesPath/cli/wmux-hook.js`
+  (`claude-context.ts:319`) and Claude Code execs it with bare `node`, which cannot read
+  `app.asar` — so every hook silently no-op'd. This is issue #81 regressed by the fork's own
+  packer: the live 0.44.0 install (built by the older hand-run process, which does copy it)
+  has the file; the 0.46.0-local.1 staging does not. It would have landed hardest on this
+  release, whose headline feature raises wmux from four hooks to eight. Fixed, plus a
+  fail-loud manifest check over every path-loaded runtime resource so the next omission
+  breaks the build instead of shipping quietly. The published zip and the `C:\tools`
+  staging were both rebuilt after the fix.
 - ASAR verified post-pack: `kiro-context.js` + `pty-crash-guard.js` present, crash guard wired into
   `pty-manager`, all four new hook events in `claude-context.js`, `noteHumanInput` in
   `agent-state`/`ipc-handlers`, native prebuilds unpacked, `wmux.exe` stamped `0.48.0`.

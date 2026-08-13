@@ -55,7 +55,18 @@ cp -r resources/claude-instructions "$APPDIR/resources/claude-instructions"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions.md"
 cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
 mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
+cp dist/cli/wmux-hook.js "$APPDIR/resources/cli/wmux-hook.js"   # Claude Code hooks run this via bare `node`, which cannot read app.asar — packaged builds resolve it at resourcesPath/cli/wmux-hook.js (issue #81)
 mkdir -p "$APPDIR/resources/cli-bin"; cp -r src/cli-bin/. "$APPDIR/resources/cli-bin/"   # wmux/wmux.cmd shims — pty-manager prepends this dir to PATH so bare `wmux` works in agent shells
+
+# Fail loudly on a missing runtime resource. Every entry here is loaded by path at
+# runtime, so omitting one produces a build that starts fine and is quietly broken
+# — how wmux-hook.js went missing for two releases (issue #81 all over again).
+for f in resources/app.asar resources/cli/wmux.js resources/cli/wmux-hook.js \
+         resources/cli-bin/wmux.cmd resources/opencode-plugin/wmux.js \
+         resources/claude-instructions.md resources/icon.png \
+         resources/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node; do
+  [ -e "$APPDIR/$f" ] || { echo "FATAL: packaged build is missing $f" >&2; exit 1; }
+done
 
 echo "-- [5/6] rcedit wmux.exe (icon + bare version $BASEVER)"
 STAGE_EXE="$APPDIR/wmux.exe" VER_BASE="$BASEVER" node -e "
