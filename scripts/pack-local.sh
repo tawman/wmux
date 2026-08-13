@@ -57,12 +57,14 @@ cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
 mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
 cp dist/cli/wmux-hook.js "$APPDIR/resources/cli/wmux-hook.js"   # Claude Code hooks run this via bare `node`, which cannot read app.asar — packaged builds resolve it at resourcesPath/cli/wmux-hook.js (issue #81)
 mkdir -p "$APPDIR/resources/cli-bin"; cp -r src/cli-bin/. "$APPDIR/resources/cli-bin/"   # wmux/wmux.cmd shims — pty-manager prepends this dir to PATH so bare `wmux` works in agent shells
+mkdir -p "$APPDIR/resources/cli-bin-ps"; cp -r src/cli-bin-ps/. "$APPDIR/resources/cli-bin-ps/"   # wmux.ps1 + its probe — powershell-shim.ts probes this dir and only then puts it on PATH, keeping cmd.exe's parser out of PowerShell (issue #154)
 
 # Fail loudly on a missing runtime resource. Every entry here is loaded by path at
 # runtime, so omitting one produces a build that starts fine and is quietly broken
 # — how wmux-hook.js went missing for two releases (issue #81 all over again).
 for f in resources/app.asar resources/cli/wmux.js resources/cli/wmux-hook.js \
-         resources/cli-bin/wmux.cmd resources/opencode-plugin/wmux.js \
+         resources/cli-bin/wmux.cmd resources/cli-bin-ps/wmux.ps1 \
+         resources/cli-bin-ps/wmux-shim-probe.ps1 resources/opencode-plugin/wmux.js \
          resources/claude-instructions.md resources/icon.png \
          resources/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node; do
   [ -e "$APPDIR/$f" ] || { echo "FATAL: packaged build is missing $f" >&2; exit 1; }
