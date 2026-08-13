@@ -94,3 +94,34 @@ injected instructions' claims rather than widening them.
   `pruneDead` in `cdp-bridge`, `stripLegacyBlocks` in both context files, new CLI timeout and
   usage strings in `wmux.js`, `resources/cli-bin-ps/` shipped, `wmux.exe` stamped `0.50.0`.
 - Released: https://github.com/tawman/wmux/releases/tag/v0.50.0-local.1
+
+## Post-release: the #154 shim is INERT on this machine
+
+Probed the staged build with wmux's own rule (`probePowerShellShim`: every *installed* host must
+print the marker; one refusal returns false):
+
+| Host | Result |
+|---|---|
+| `powershell.exe` (Windows PowerShell 5.1) | **FAIL** — "running scripts is disabled on this system" |
+| `pwsh.exe` (PowerShell 7) | PASS |
+
+`Get-ExecutionPolicy -List` shows every persistent scope `Undefined`, i.e. 5.1's client default of
+**Restricted**. No Mark of the Web is involved (the shim files carry no `Zone.Identifier`; they were
+built locally, not extracted from a downloaded zip). The probe was run with
+`PSExecutionPolicyPreference` cleared, exactly as `runProbe` does, so it reflects what wmux will
+conclude at startup — not what an inherited `-ExecutionPolicy Bypass` would suggest.
+
+**Consequence:** `powerShellShimDir()` stays null, `cli-bin-ps` is left off PATH, and `wmux` in
+PowerShell keeps resolving `wmux.cmd` — so the argument-mangling bug #154 fixes (`wmux browser eval
+"…length>0"` silently redirecting into a file named `0`) is still live here. The fix ships correctly
+and fails safe; it simply cannot engage under Restricted.
+
+**To enable it** (operator decision — this changes a machine security setting, so it was not done
+as part of the sync):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`RemoteSigned` is sufficient: it allows unsigned *local* scripts, and these carry no MOTW. wmux
+re-probes on every launch, so the shim turns itself on at the next start with no rebuild.
