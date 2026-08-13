@@ -125,6 +125,18 @@ once per machine:
 [Environment]::SetEnvironmentVariable('WMUX_DISABLE_UPDATER','1','User')
 ```
 
+## Gotchas when verifying
+
+- **`npx asar extract-file <archive> package.json` writes into the CURRENT directory.**
+  It does not print to stdout. Run from the repo root while inspecting some *other*
+  build's asar and it silently overwrites `./package.json` with that build's version —
+  which then packages the wrong version on the next run. Always `cd` to a scratch dir
+  first, or read the version with `asar list` / a full `asar extract` into `/tmp`.
+- **`pack-local.sh` asserts its own output.** Every runtime resource loaded *by path*
+  (not bundled into `app.asar`) is checked at the end of step 4, and a missing one aborts
+  the pack. Add to that list when adding a resource — `wmux-hook.js` was absent from two
+  releases because nothing failed when it went missing (issue #81).
+
 ## Verify a release
 
 - `node -p "require('./package.json').version"` → `0.15.1-local.1`.
