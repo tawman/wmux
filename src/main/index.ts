@@ -16,7 +16,7 @@ import { initUpdateChecker, getLatestUpdate } from './update-checker';
 import { initAgentIntegration } from './agent-integration';
 import { applyExternalActivity, markSubagentStop, markAllAgentsDone } from './claude-observer';
 import { handleAgentStateV2, setAnswerWriter } from './agent-state-rpc';
-import { applyHookToAgentState } from './agent-hook-bridge';
+import { applyHookToAgentState, hookEventName } from './agent-hook-bridge';
 import { startOrchestrationWatcher } from './orchestration-watcher';
 import { A2AStore } from './a2a-store';
 import { readMarkdownFile } from './markdown-file';
@@ -435,10 +435,15 @@ function handleHookEvent(params: any): void {
   // Same events, second consumer: declared agent run state (issue #128). This
   // is what makes "which pane is parked on me?" work for Claude Code with no
   // plugin to install — wmux already registers these hooks.
-  if (params?.surfaceId && params?.event) {
+  // The event is resolved, not read straight off the payload: the per-tool
+  // PostToolUse entries invoke the hook helper by bare tool name, so they arrive
+  // with a `tool` and no `event` at all — and gating on `params.event` dropped
+  // every one of them. See hookEventName for what that costs.
+  const hookEvent = hookEventName(params);
+  if (params?.surfaceId && hookEvent) {
     applyHookToAgentState(
       params.surfaceId as SurfaceId,
-      String(params.event),
+      hookEvent,
       params.message ?? null,
       Number.isFinite(params.at) ? Number(params.at) : undefined,
     );
@@ -721,8 +726,12 @@ app.whenReady().then(() => {
         // Re-read ~/.wmux/config.toml and live-apply to every open window.
         (async () => {
           try {
-            const { loadUserConfig } = await import('./user-config');
+            const { loadUserConfig, resetConfigWarnings } = await import('./user-config');
             const { loadUserLocales } = await import('./user-locales');
+            // A reload is the user saying "I have edited it" — so re-report the
+            // problems the file still has rather than staying quiet because the
+            // pre-edit version already warned about them.
+            resetConfigWarnings();
             // Same contract as the IPC path: one reload covers all of ~/.wmux,
             // including community translations (issue #147).
             const cfg = { ...loadUserConfig(), locales: loadUserLocales() };

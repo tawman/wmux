@@ -1,22 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { readRenderedInstructions } from './agent-instructions';
 
 const START_MARKER = '<!-- wmux:start';
 const END_MARKER = '<!-- wmux:end -->';
 
-function getInstructionsPath(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { app } = require('electron') as typeof import('electron');
-    if (app.isPackaged) {
-      return path.join(process.resourcesPath, 'claude-instructions', 'claude-instructions.md');
-    }
-  } catch {
-    // Not in Electron
-  }
-  return path.join(__dirname, '../../resources/claude-instructions.md');
-}
 
 function getClaudeMdPath(): string {
   return path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -112,13 +101,11 @@ function collapse(text: string): string {
  */
 export function ensureClaudeContext(): void {
   try {
-    const instructionsPath = getInstructionsPath();
-    if (!fs.existsSync(instructionsPath)) {
-      console.warn('[wmux] claude-instructions.md not found at', instructionsPath);
-      return;
-    }
-
-    const wmuxBlock = fs.readFileSync(instructionsPath, 'utf-8');
+    // Rendered rather than read: the block carries this install's absolute CLI
+    // path, so a session that wmux did not spawn (and therefore has no `wmux`
+    // on PATH) can still tell "not running" from "not reachable" — issue #158.
+    const wmuxBlock = readRenderedInstructions();
+    if (wmuxBlock === null) return;
     const claudeMdPath = getClaudeMdPath();
     const claudeDir = path.dirname(claudeMdPath);
 
@@ -442,6 +429,49 @@ export function removeClaudeHooks(): void {
 }
 
 /**
+ * Version selected for this wmux release. Do not use a mutable npm dist-tag
+ * here: this command is persisted in Claude's settings and may execute long
+ * after the wmux release that wrote it.
+ */
+export const CHROME_DEVTOOLS_MCP_PACKAGE = 'chrome-devtools-mcp@1.7.0';
+
+/** Build the custom MCP server entry written to Claude's settings. */
+export function buildChromeDevtoolsMcpServer(): { command: string; args: string[] } {
+  return {
+    command: 'npx',
+    args: ['-y', CHROME_DEVTOOLS_MCP_PACKAGE, '--browserUrl=http://127.0.0.1:9222'],
+  };
+}
+
+/**
+ * Whether a `chrome-devtools` entry already in settings.json is one wmux wrote.
+ *
+ * The predicate has to be "did wmux author this", not "is this what wmux wants".
+ * Pinning the package (#161) means the desired entry changes on every release
+ * that moves the pin, and a plain inequality check would therefore rewrite the
+ * entry on every launch — including one the user had deliberately retuned. That
+ * is precisely the behaviour issue #132 was filed about, and it would have made
+ * the write path contradict {@link removeChromeDevtoolsConfig}, which already
+ * takes care to leave a user's own entry alone on the way out.
+ *
+ * wmux's signature is narrow and stable across pins: launched via npx, running
+ * the chrome-devtools-mcp package, aimed at wmux's own CDP proxy port. Anything
+ * else — a different port, a global install, extra flags someone added — is
+ * treated as the user's and left untouched.
+ */
+export function isWmuxAuthoredMcpEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as { command?: unknown; args?: unknown };
+  if (e.command !== 'npx') return false;
+  if (!Array.isArray(e.args)) return false;
+  const args = e.args.filter((a): a is string => typeof a === 'string');
+  return (
+    args.some(a => a.startsWith('chrome-devtools-mcp@')) &&
+    args.includes('--browserUrl=http://127.0.0.1:9222')
+  );
+}
+
+/**
  * Configures chrome-devtools-mcp to connect to wmux's CDP proxy on localhost:9222.
  * Disables the plugin version and adds a custom MCP server in settings.json with
  * --browserUrl pointing to wmux. This is more reliable than modifying the plugin cache.
@@ -464,14 +494,18 @@ export function ensureChromeDevtoolsConfig(): void {
       changed = true;
     }
 
-    // Add as custom MCP server with --browserUrl
+    // Add as custom MCP server with --browserUrl.
+    //
+    // Written when there is no entry at all, and rewritten only when the entry
+    // present is one wmux itself authored — which is how the @latest → pinned
+    // migration reaches existing installs without wmux clobbering an entry the
+    // user has since retuned. See isWmuxAuthoredMcpEntry.
     if (!settings.mcpServers) settings.mcpServers = {};
     const existing = settings.mcpServers['chrome-devtools'];
-    if (!existing || !JSON.stringify(existing).includes('9222')) {
-      settings.mcpServers['chrome-devtools'] = {
-        command: 'npx',
-        args: ['-y', 'chrome-devtools-mcp@latest', '--browserUrl=http://127.0.0.1:9222'],
-      };
+    const desired = buildChromeDevtoolsMcpServer();
+    const mine = !existing || isWmuxAuthoredMcpEntry(existing);
+    if (mine && JSON.stringify(existing) !== JSON.stringify(desired)) {
+      settings.mcpServers['chrome-devtools'] = desired;
       changed = true;
     }
 
