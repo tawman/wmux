@@ -4,7 +4,7 @@ Electron-based Windows terminal multiplexer for AI agents. TypeScript, React 19,
 
 **Owner**: amirlehmam (GitHub) — speaks French, prefers fast pragmatic solutions, tests live.
 **Repo**: github.com/amirlehmam/wmux | **Site**: wmux.org (Netlify, static from `site/`)
-**Version**: 1.1.0
+**Version**: 1.4.0
 
 ---
 
@@ -486,6 +486,16 @@ wmux log <level> <message> | sidebar-state
 
 # Hooks
 wmux hook --event <type> --tool <name> [--agent <id>]
+
+# Crash reports (issue #174) — needs no running wmux, which is the point
+wmux crash-report [--events N] [--log-lines N]
+# Event Log fingerprint (Application Error 1000 + Windows Error Reporting 1001,
+# joined on report id) plus the tail of %APPDATA%\wmux\logs\main.log. Read from
+# the events' positional Properties, never the rendered message: the message is
+# LOCALISED (a French Windows says "Nom du module défaillant") and matching the
+# exe by substring attributed a sibling project's crash to wmux. Never reads
+# properties [10]/[11] — those are full paths, and the path carries the
+# Windows username. See docs/crash-reports.md.
 ```
 
 ---
@@ -531,8 +541,8 @@ Static site in `site/`. Deployed to Netlify (`netlify.toml` at repo root).
 npx netlify deploy --prod --dir site
 ```
 
-`site/index.html` — Landing page with i18n (English, French, Arabic, Japanese).
-`site/i18n.js` — Language switching via URL hash (`#ar`, `#fr`, `#ja`).
+`site/index.html` — Landing page with i18n (21 languages, including RTL Arabic).
+`site/i18n.js` — Language switching via URL hash (`#<code>`, e.g. `#ar`, `#fr`, `#pt`, `#ja`).
 
 ---
 
