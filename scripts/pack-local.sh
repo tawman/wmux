@@ -68,8 +68,16 @@ mkdir -p "$APPDIR/resources/claude-instructions"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions/claude-instructions.md"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions.md"
 cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
-mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
-cp dist/cli/wmux-hook.js "$APPDIR/resources/cli/wmux-hook.js"   # Claude Code hooks run this via bare `node`, which cannot read app.asar — packaged builds resolve it at resourcesPath/cli/wmux-hook.js (issue #81)
+# EVERY compiled CLI module, not the two entry points. wmux.js and wmux-hook.js are
+# run by bare `node` (which cannot read app.asar — issue #81), so each one's siblings
+# have to sit beside it: wmux.js requires ./transport-deadline and ./wsl-network,
+# wmux-hook.js requires ./transport-deadline. Copying only the entry points produced a
+# CLI that failed with MODULE_NOT_FOUND on the first line of `wmux ping` and of every
+# Claude Code hook. tests/unit/packaging.test.ts derives exactly this closure, but it
+# asserts against electron-builder's extraResources — which this script does not use,
+# so a green test suite said nothing about the artifact we actually ship. Glob the
+# directory rather than enumerate it, so a new module cannot be forgotten here.
+mkdir -p "$APPDIR/resources/cli"; cp dist/cli/*.js "$APPDIR/resources/cli/"
 mkdir -p "$APPDIR/resources/cli-bin"; cp -r src/cli-bin/. "$APPDIR/resources/cli-bin/"   # wmux/wmux.cmd shims — pty-manager prepends this dir to PATH so bare `wmux` works in agent shells
 mkdir -p "$APPDIR/resources/cli-bin-ps"; cp -r src/cli-bin-ps/. "$APPDIR/resources/cli-bin-ps/"   # wmux.ps1 + its probe — powershell-shim.ts probes this dir and only then puts it on PATH, keeping cmd.exe's parser out of PowerShell (issue #154)
 
@@ -83,6 +91,17 @@ for f in resources/app.asar resources/cli/wmux.js resources/cli/wmux-hook.js \
          resources/claude-instructions/claude-instructions.md \
          resources/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node; do
   [ -e "$APPDIR/$f" ] || { echo "FATAL: packaged build is missing $f" >&2; exit 1; }
+done
+
+# The CLI's sibling closure, derived from the shipped files rather than listed. A miss
+# here is not a quietly-absent feature but MODULE_NOT_FOUND on the first line of every
+# `wmux` invocation, so it is worth re-deriving at pack time instead of trusting that
+# the copy above stayed complete.
+for entry in "$APPDIR"/resources/cli/*.js; do
+  for dep in $(grep -oE 'require\("\./[^"]+"\)' "$entry" | sed -E 's|require\("\./(.+)"\)|\1|' || true); do
+    [ -e "$APPDIR/resources/cli/$dep.js" ] || {
+      echo "FATAL: resources/cli/$dep.js missing, required by $(basename "$entry")" >&2; exit 1; }
+  done
 done
 
 echo "-- [5/6] rcedit wmux.exe (icon + bare version $BASEVER)"
