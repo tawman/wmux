@@ -120,10 +120,10 @@ git checkout production/local && git merge master
 `CLAUDE.md` auto-merged, taking upstream's `**Version**: 1.5.1` line while keeping the fork's
 "Fork Build on production/local" section intact.
 
-## Two packaging defects found while cutting this release
+## Three packaging defects found while cutting this release
 
-Not upstream's, and not new to this sync — both were wrong in every local release `pack-local.sh`
-has produced. Fixed in `b1a31a5`.
+Not upstream's, and not new to this sync — all three were wrong in every local release
+`pack-local.sh` has produced. Fixed in `b1a31a5` and `2bab095`.
 
 1. **The packaged build shipped stale agent instructions.** `resources/claude-instructions.md` (108
    lines) is canonical, but `agent-instructions.ts` reads the **directory** copy
@@ -137,5 +137,27 @@ has produced. Fixed in `b1a31a5`.
    local release silently took the png fallback — a downscaled 512px png at the 16/20/24px slots the
    shell actually draws. Now copied from `resources/icons/icon.ico`.
 
-Both files were added to the step-4 resource guard, which exists precisely so a
-resource loaded *by path* cannot go missing silently (issue #81).
+3. **The packaged CLI was broken outright** — the most serious of the three, caught only by
+   inspecting the staged folder against `CLAUDE.md`'s four-file checklist. `resources/cli/` received
+   `wmux.js` and `wmux-hook.js` and nothing else, but both are run by bare `node` (which cannot read
+   `app.asar`, issue #81), so each one's siblings must sit beside it: `wmux.js` requires
+   `./transport-deadline` **and** `./wsl-network`, `wmux-hook.js` requires `./transport-deadline`.
+   Neither was copied. That is not a degraded feature but `MODULE_NOT_FOUND` on the first line of
+   `wmux ping` and of every Claude Code hook — the agent integration, the PATH shims and the hooks,
+   all at once.
+
+   **Why the test suite did not catch it:** `tests/unit/packaging.test.ts` derives exactly this
+   closure and passes. It asserts against electron-builder's `extraResources`, which
+   `pack-local.sh` does not use — the fork hand-copies instead. A green suite therefore said nothing
+   about the artifact we actually ship. The packer now globs `dist/cli/*.js` rather than naming
+   files, and re-derives the closure from its own output as a pack-time assertion. Verified after
+   the fix by running the packaged file directly: `node release/wmux/resources/cli/wmux.js ping`
+   → `pong`.
+
+The first two files were added to the step-4 resource guard, which exists precisely so a
+resource loaded *by path* cannot go missing silently (issue #81); the CLI closure gets a derived
+check of its own, since enumerating it is what failed here.
+
+**Standing lesson:** `npm test` green does **not** validate a local release artifact. The fork's
+packer is outside every packaging assertion upstream owns. Inspect the staged folder against the
+`CLAUDE.md` release checklist before shipping — that checklist is what surfaced all three.
