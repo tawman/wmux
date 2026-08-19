@@ -47,11 +47,25 @@ rm -f "$APPDIR/resources/default_app.asar"
 cp build-out/app.asar "$APPDIR/resources/app.asar"
 cp -r build-out/app.asar.unpacked "$APPDIR/resources/app.asar.unpacked"
 cp resources/icon.png "$APPDIR/resources/"
+# getAppIcon() prefers resourcesPath/icon.ico over the png — a multi-size ICO is a
+# crisp mark at the 16/20/24px slots the shell actually draws, where a downscaled
+# 512px png smudges. The Electron dist base carries no icon.ico, so without this the
+# packaged build silently took the png fallback path on every local release.
+cp resources/icons/icon.ico "$APPDIR/resources/icon.ico"
 cp -r resources/themes "$APPDIR/resources/themes"
 cp -r resources/sounds "$APPDIR/resources/sounds"
 mkdir -p "$APPDIR/resources/shell-integration"; cp -r src/shell-integration/. "$APPDIR/resources/shell-integration/"
 cp -r resources/wmux-orchestrator "$APPDIR/resources/wmux-orchestrator"
-cp -r resources/claude-instructions "$APPDIR/resources/claude-instructions"
+# resources/claude-instructions.md is the canonical text; the packaged build reads
+# the DIRECTORY copy (agent-instructions.ts resolves resourcesPath/claude-instructions/
+# claude-instructions.md in production, and the root file only in dev). The tracked
+# resources/claude-instructions/claude-instructions.md is a duplicate that stopped
+# being updated at 4498cf1 — 43 lines against the canonical 108, missing the #152/#158
+# "check whether wmux is actually here" gate. Copying it verbatim therefore shipped a
+# build whose agent instructions were two fixes behind, silently. Derive the dir copy
+# from the canonical file instead, so the duplicate cannot drift into a release again.
+mkdir -p "$APPDIR/resources/claude-instructions"
+cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions/claude-instructions.md"
 cp resources/claude-instructions.md "$APPDIR/resources/claude-instructions.md"
 cp -r resources/opencode-plugin "$APPDIR/resources/opencode-plugin"
 mkdir -p "$APPDIR/resources/cli"; cp dist/cli/wmux.js "$APPDIR/resources/cli/wmux.js"
@@ -65,7 +79,8 @@ mkdir -p "$APPDIR/resources/cli-bin-ps"; cp -r src/cli-bin-ps/. "$APPDIR/resourc
 for f in resources/app.asar resources/cli/wmux.js resources/cli/wmux-hook.js \
          resources/cli-bin/wmux.cmd resources/cli-bin-ps/wmux.ps1 \
          resources/cli-bin-ps/wmux-shim-probe.ps1 resources/opencode-plugin/wmux.js \
-         resources/claude-instructions.md resources/icon.png \
+         resources/claude-instructions.md resources/icon.png resources/icon.ico \
+         resources/claude-instructions/claude-instructions.md \
          resources/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/pty.node; do
   [ -e "$APPDIR/$f" ] || { echo "FATAL: packaged build is missing $f" >&2; exit 1; }
 done
