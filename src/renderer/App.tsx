@@ -1,16 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { v4 as uuid } from 'uuid';
 import { useStore } from './store';
 import { PaneId, SurfaceId, SurfaceRef, WorkspaceId, WorkspaceInfo, SplitNode } from '../shared/types';
 import { cwdReportPatch } from '../shared/paths';
 import SplitContainer from './components/SplitPane/SplitContainer';
-import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface, freezeSurfaceCwds } from './store/split-utils';
+import { updateRatio, getAllPaneIds, findLeaf, replaceSoleTerminalSurface, freezeSurfaceCwds, buildDefaultSplitTree } from './store/split-utils';
+import { resolveDefaultSplitTree } from './store/workspace-slice';
 import { DEFAULT_DEV_PORTS, mergeDevPorts, matchDevPorts, firstNewDevPort } from './dev-ports';
 import { aggregateProgress } from './store/progress-slice';
 import { isDiffTabDismissed } from './store/surface-slice';
 import Sidebar from './components/Sidebar/Sidebar';
+import { applyPrCommand } from './pr-metadata';
 import Titlebar from './components/Titlebar/Titlebar';
-import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useKeyboardShortcuts, matchesBinding } from './hooks/useKeyboardShortcuts';
 import SettingsWindow from './components/Settings/SettingsWindow';
 import CommandPalette from './components/CommandPalette/CommandPalette';
 import ShortcutCheatSheet from './components/CheatSheet/ShortcutCheatSheet';
@@ -330,18 +331,15 @@ function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): voi
     case 'clear_git_branch':
       deps.updateWorkspaceMetadata(ws.id, { gitBranch: undefined, gitDirty: undefined });
       break;
-    case 'report_pr': {
-      const [num, status, ...labelParts] = cmd.args || [];
-      deps.updateWorkspaceMetadata(ws.id, {
-        prNumber: num ? parseInt(num) : undefined,
-        prStatus: status as any,
-        prLabel: labelParts.join(' '),
-      });
+    case 'report_pr':
+    case 'clear_pr': {
+      // See pr-metadata.ts: `clear_pr` is gated on the surface that reported
+      // the PR still being the one asking to clear it, so one pane's poller
+      // can't wipe another pane's PR out of a shared workspace row.
+      const patch = applyPrCommand(cmd, ws);
+      if (patch) deps.updateWorkspaceMetadata(ws.id, patch);
       break;
     }
-    case 'clear_pr':
-      deps.updateWorkspaceMetadata(ws.id, { prNumber: undefined, prStatus: undefined, prLabel: undefined });
-      break;
     case 'report_shell_state':
       applyShellState(cmd, ws, deps);
       break;
@@ -378,7 +376,7 @@ function handleAgentLifecycleEvent(event: any, addNotification: StoreAction, t: 
  * (enforced in replaceSoleTerminalSurface), and not itself an agent surface.
  * Returns true when the spawn was handled via replacement.
  */
-function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfaceId: any, meta: any) => void): boolean {
+export function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfaceId: any, meta: any) => void): boolean {
   if (!event.replaceTab) return false;
   const state = useStore.getState();
   const leaf = findLeaf(ws.splitTree, event.paneId);
@@ -393,43 +391,14 @@ function tryReplaceTabSpawn(event: any, ws: WorkspaceInfo, setAgentMeta: (surfac
   // Intentionally not pushed onto the reopen-closed stack — the replaced
   // surface is an idle default shell, not user work.
   window.wmux?.pty?.kill(replacedSurfaceId);
+  // This kills the PTY directly instead of routing through closeSurface, so
+  // it must run the same ownership-gated PR-badge clear closeSurface would
+  // have run — otherwise a replaced tab that happened to hold the PR badge
+  // leaves `prSurfaceId` pointing at a surface that no longer exists, and
+  // since clear_pr is only honoured from its owner (see pr-metadata.ts), the
+  // badge becomes unclearable by anything, ever.
+  state.clearPrIfSurfaceOwner(event.workspaceId, [replacedSurfaceId]);
   return true;
-}
-
-/** Build the default 3-terminal split layout for new workspaces */
-function buildDefaultSplitTree(): SplitNode {
-  return {
-    type: 'branch',
-    direction: 'vertical',
-    ratio: 0.5,
-    children: [
-      {
-        type: 'branch',
-        direction: 'horizontal',
-        ratio: 0.5,
-        children: [
-          {
-            type: 'leaf',
-            paneId: `pane-${uuid()}` as PaneId,
-            surfaces: [{ id: `surf-${uuid()}` as SurfaceId, type: 'terminal' }],
-            activeSurfaceIndex: 0,
-          },
-          {
-            type: 'leaf',
-            paneId: `pane-${uuid()}` as PaneId,
-            surfaces: [{ id: `surf-${uuid()}` as SurfaceId, type: 'terminal' }],
-            activeSurfaceIndex: 0,
-          },
-        ],
-      },
-      {
-        type: 'leaf',
-        paneId: `pane-${uuid()}` as PaneId,
-        surfaces: [{ id: `surf-${uuid()}` as SurfaceId, type: 'terminal' }],
-        activeSurfaceIndex: 0,
-      },
-    ],
-  };
 }
 
 export default function App() {
@@ -493,12 +462,10 @@ export default function App() {
   // Global keyboard listener for command palette toggle (Ctrl+Shift+P)
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent): void {
-      const binding = shortcuts.commandPalette;
-      const matches =
-        e.key === binding.key &&
-        !!binding.ctrl === e.ctrlKey &&
-        !!binding.shift === e.shiftKey &&
-        !!binding.alt === e.altKey;
+      // matchesBinding lowercases single-letter keys before comparing — Shift
+      // uppercases e.key (Ctrl+Shift+P fires with e.key='P'), but bindings are
+      // stored lowercase. A naive e.key === binding.key here never matched.
+      const matches = matchesBinding(e, shortcuts.commandPalette);
 
       if (matches) {
         e.preventDefault();
@@ -549,11 +516,14 @@ export default function App() {
       // 'fresh' means main deliberately wants this window empty — a named
       // session must not be cloned into it (issue #143).
       if (outcome !== 'fresh' && await restoreNamedSession(t, setSidebarWidth)) return;
-      // Nothing to restore — create the default workspace.
+      // Nothing to restore — create the default workspace. Explicitly resolves
+      // to the configured default layout if one is set, else the classic
+      // 3-pane factory layout — first-launch's own historical baseline,
+      // distinct from Ctrl+N/CLI's single-pane one (see resolveDefaultSplitTree).
       if (useStore.getState().workspaces.length === 0) {
         createWorkspace({
           title: t('app.firstSessionTitle', 'Session 1'),
-          splitTree: buildDefaultSplitTree(),
+          splitTree: resolveDefaultSplitTree(useStore.getState, buildDefaultSplitTree),
         });
       }
     })();
@@ -843,7 +813,9 @@ export default function App() {
     const wsCount = useStore.getState().workspaces.length;
     const newId = createWorkspace({
       title: t('app.sessionTitle', 'Session {n}').replace('{n}', String(wsCount + 1)),
-      splitTree: buildDefaultSplitTree(),
+      // Sidebar "+" button's own historical baseline (3-pane), distinct from
+      // Ctrl+N/CLI — see resolveDefaultSplitTree's doc comment.
+      splitTree: resolveDefaultSplitTree(useStore.getState, buildDefaultSplitTree),
     });
     selectWorkspace(newId);
   }, [createWorkspace, selectWorkspace, t]);
