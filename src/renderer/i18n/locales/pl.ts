@@ -76,6 +76,10 @@ export const pl: Translation = {
   'settings.tab.help': 'Pomoc',
   'settings.help.about': 'O wmux',
   'settings.help.version': 'Wersja',
+  'settings.help.checkUpdate': 'Sprawdź aktualizacje',
+  'settings.help.updateTo': 'Aktualizuj do',
+  'settings.help.upToDate': 'Aktualne',
+  'settings.help.downloading': 'Pobieranie',
   'settings.help.reportIssue': 'Zgłoś problem',
   'settings.help.website': 'Strona internetowa',
   'settings.help.hint': 'Znalazłeś błąd lub masz prośbę? Otwórz zgłoszenie na GitHubie.',
@@ -402,6 +406,8 @@ export const pl: Translation = {
   'settings.workspacePanel.confirmClose': 'Potwierdzaj przed zamknięciem sesji',
   'settings.workspacePanel.confirmCloseHint':
     'Pytaj, zanim przycisk ×, menu kontekstowe lub Ctrl+Shift+W zamknie sesję — przypadkowy klik nie może zatrzymać agentów, którzy nie zapisali jeszcze swojego stanu. Zamknięcia z CLI i od agentów nigdy nie pytają.',
+  'settings.workspacePanel.restoreClaudeSessions': 'Wznów sesje Claude Code przy przywracaniu',
+  'settings.workspacePanel.restoreClaudeSessionsHint': 'Gdy wmux przywraca sesję, ponownie uruchamia każdy terminal, w którym działał Claude Code, poleceniem `claude --resume` w pierwotnym katalogu. Domyślnie wyłączone: każdy taki panel od razu uruchamia agenta. Panele, których rozmowy Claude już nie ma, są pomijane, a Claude zamknięty poprawnie nie jest wznawiany.',
   'settings.workspacePanel.autoOpenDiff': 'Automatycznie otwieraj kartę Diff przy zmianach agenta',
   'settings.workspacePanel.autoOpenDiffHint':
     'Gdy Claude edytuje lub zapisuje pliki, wmux otwiera kartę Diff w dolnym panelu. Wyłącz, aby się nie pojawiała.',

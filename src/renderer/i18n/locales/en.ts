@@ -83,6 +83,10 @@ export const en = {
   'settings.tab.help': 'Help',
   'settings.help.about': 'About wmux',
   'settings.help.version': 'Version',
+  'settings.help.checkUpdate': 'Check for updates',
+  'settings.help.updateTo': 'Update to',
+  'settings.help.upToDate': 'Up to date',
+  'settings.help.downloading': 'Downloading',
   'settings.help.reportIssue': 'Report an Issue',
   'settings.help.website': 'Website',
   'settings.help.hint': 'Found a bug or have a request? Open an issue on GitHub.',
@@ -409,6 +413,8 @@ export const en = {
   'settings.workspacePanel.confirmClose': 'Confirm before closing a session',
   'settings.workspacePanel.confirmCloseHint':
     "Ask before the × button, the context menu or Ctrl+Shift+W closes a session — a stray click can't take down agents that haven't saved their state yet. Closes from the CLI and agents never prompt.",
+  'settings.workspacePanel.restoreClaudeSessions': 'Resume Claude Code sessions on restore',
+  'settings.workspacePanel.restoreClaudeSessionsHint': 'When wmux restores a session, re-launch each terminal that was running Claude Code with `claude --resume`, in the directory it was in. Off by default: every such pane starts an agent at once. Panes whose conversation Claude no longer has are skipped, and a Claude you exited cleanly is not resumed.',
   'settings.workspacePanel.autoOpenDiff': 'Auto-open diff tab on agent edits',
   'settings.workspacePanel.autoOpenDiffHint':
     'When Claude edits or writes files, wmux pops a diff tab in the bottom pane. Turn this off to stop it appearing.',

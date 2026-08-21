@@ -66,6 +66,10 @@ export const nl: Translation = {
   'settings.tab.help': 'Help',
   'settings.help.about': 'Over wmux',
   'settings.help.version': 'Versie',
+  'settings.help.checkUpdate': 'Controleren op updates',
+  'settings.help.updateTo': 'Bijwerken naar',
+  'settings.help.upToDate': 'Up-to-date',
+  'settings.help.downloading': 'Downloaden',
   'settings.help.reportIssue': 'Een probleem melden',
   'settings.help.website': 'Website',
   'settings.help.hint': 'Een bug gevonden of een verzoek? Open een issue op GitHub.',
@@ -391,6 +395,8 @@ export const nl: Translation = {
   'settings.workspacePanel.confirmClose': 'Bevestigen voordat een sessie wordt gesloten',
   'settings.workspacePanel.confirmCloseHint':
     'Vraagt om bevestiging voordat de ×-knop, het contextmenu of Ctrl+Shift+W een sessie sluit — een verdwaalde klik kan geen agenten platleggen die hun status nog niet hebben opgeslagen. Sluiten vanuit de CLI en door agenten vraagt nooit om bevestiging.',
+  'settings.workspacePanel.restoreClaudeSessions': 'Claude Code-sessies hervatten bij herstel',
+  'settings.workspacePanel.restoreClaudeSessionsHint': 'Wanneer wmux een sessie herstelt, wordt elke terminal waarin Claude Code draaide opnieuw gestart met `claude --resume`, in de map waar hij stond. Standaard uit: al die vensters starten in één keer een agent. Vensters waarvan Claude het gesprek niet meer heeft worden overgeslagen, en een Claude die je netjes hebt afgesloten wordt niet hervat.',
   'settings.workspacePanel.autoOpenDiff': 'Diff-tabblad automatisch openen bij bewerkingen door agent',
   'settings.workspacePanel.autoOpenDiffHint':
     'Wanneer Claude bestanden bewerkt of schrijft, opent wmux een diff-tabblad in het onderste paneel. Schakel dit uit om dit te voorkomen.',

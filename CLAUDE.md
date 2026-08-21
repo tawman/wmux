@@ -4,7 +4,7 @@ Electron-based Windows terminal multiplexer for AI agents. TypeScript, React 19,
 
 **Owner**: amirlehmam (GitHub) — speaks French, prefers fast pragmatic solutions, tests live.
 **Repo**: github.com/amirlehmam/wmux | **Site**: wmux.org (Netlify, static from `site/`)
-**Version**: 1.6.0
+**Version**: 1.8.0
 
 ---
 
@@ -121,6 +121,7 @@ docs/             Planning docs
 | `agent-integration.ts` | Consent gate for every write outside `%APPDATA%\wmux` (issue #132). Asks on first launch, stores `unset`/`granted`/`declined` in wmux's own settings.json, and reconciles `~/.claude` + `~/.config/opencode` + `~/.kiro` to match. Nothing in `claude-context.ts`, `opencode-context.ts` or `kiro-context.ts` may be called directly from startup any more — route it through here |
 | `kiro-context.ts` | Kiro CLI support (issue #148). Writes `~/.kiro/steering/wmux.md` — a dedicated global steering file, since Kiro loads every `.md` in that dir, so there is no shared file to splice into. No hooks: Kiro's are per-project (`.kiro/hooks/`), and writing into every repo the user opens is the #132 mistake. State comes from `wmux report-agent` instead |
 | `claude-observer.ts` | Monitors Claude Code activity for sidebar display |
+| `claude-resume.ts` | `claude --resume` on workspace restore (#186), behind `workspacePrefs.restoreClaudeSessions` (**default off** — every such pane starts an agent at once). Stamps each terminal's live session id into the PERSISTED tree only, the way `freezeSurfaceCwds` stamps cwd; a live surface never carries one. Main-side rather than renderer-side because the id lives in `agent-state.ts`'s record map. The id reaches a command line, so `CLAUDE_SESSION_ID_RE` is a security boundary, enforced at `reportAgentSession` AND again in `claude-resume-command.ts` (session.json is user-editable). `handleHookEvent` must skip `SessionEnd`: it carries a session_id like every hook, but `releaseAgent()` has just run for it, and recording there would resume a Claude the user deliberately quit |
 | `agent-state.ts` | Declared agent run state — blocked/working/idle, run refcount, `seq` dedupe, metadata TTL (issue #128). Also the back-channel: declared `choices` + `answerAgent`. **Answering never clears `blocked`** — the agent must confirm, or a mis-declared key silently stops a stuck pane asking for help |
 | `agent-state-rpc.ts` | `pane.report_agent` & friends, routed off the main V2 switch |
 | `agent-hook-bridge.ts` | Claude Code hooks → declared state, so it works with no plugin to install |
@@ -131,7 +132,8 @@ docs/             Planning docs
 | `theme-loader.ts` | Theme loading |
 | `config-loader.ts` | WT/Ghostty config import |
 | `shell-detector.ts` | Available shells detection |
-| `updater.ts` | Auto-update (electron-updater) |
+| `updater.ts` | Auto-update. Routes by install layout: NSIS → `electron-updater`, portable zip → `zip-updater.ts` (#184). `initAutoUpdater()` returns before registering `NsisUpdater` on a zip extract, so a portable install can never enter the #96 "update ready" loop |
+| `zip-updater.ts` | In-place update for portable zip extracts (#184). Detection is the whole contract: `wmux.exe` present, `Uninstall wmux.exe` absent — that name is electron-builder's `Uninstall ${productFilename}.exe`, so it moves if `productName`/`executableName` ever change. Download via `net.request`, extract via System32 `tar.exe` (PowerShell `Expand-Archive` fallback), then a detached cmd helper waits on the old PID and robocopies over the install root. The helper's relaunch is **unconditional** — wmux has already quit, so bailing out on a copy failure is the one outcome the user can't recover from |
 
 ### Renderer (`src/renderer/`)
 

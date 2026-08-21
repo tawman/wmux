@@ -76,6 +76,10 @@ export const uk: Translation = {
   'settings.tab.help': 'Довідка',
   'settings.help.about': 'Про wmux',
   'settings.help.version': 'Версія',
+  'settings.help.checkUpdate': 'Перевірити оновлення',
+  'settings.help.updateTo': 'Оновити до',
+  'settings.help.upToDate': 'Актуальна версія',
+  'settings.help.downloading': 'Завантаження',
   'settings.help.reportIssue': 'Повідомити про помилку',
   'settings.help.website': 'Веб-сайт',
   'settings.help.hint': 'Знайшли помилку або маєте запит? Відкрийте питання на GitHub.',
@@ -402,6 +406,8 @@ export const uk: Translation = {
   'settings.workspacePanel.confirmClose': 'Підтверджувати закриття сеансу',
   'settings.workspacePanel.confirmCloseHint':
     'Запитувати перед тим, як кнопка ×, контекстне меню або Ctrl+Shift+W закриють сеанс — випадковий клік не зможе зупинити агентів, які ще не зберегли свій стан. Закриття з CLI та від агентів запит не викликають.',
+  'settings.workspacePanel.restoreClaudeSessions': 'Відновлювати сесії Claude Code під час відновлення',
+  'settings.workspacePanel.restoreClaudeSessionsHint': 'Коли wmux відновлює сесію, кожен термінал, у якому працював Claude Code, перезапускається командою `claude --resume` у початковому каталозі. Типово вимкнено: усі такі панелі одразу запускають агента. Панелі, розмови яких Claude уже не має, пропускаються, а коректно завершений Claude не відновлюється.',
   'settings.workspacePanel.autoOpenDiff': 'Автовідкриття вкладки Diff під час правок агента',
   'settings.workspacePanel.autoOpenDiffHint':
     'Коли Claude редагує або записує файли, wmux відкриває вкладку Diff у нижній панелі. Вимкніть, щоб вона не з\'являлася.',
