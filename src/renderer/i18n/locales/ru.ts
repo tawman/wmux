@@ -241,6 +241,9 @@ export const ru: Translation = {
   'settings.browser.defaultSearchEngine': 'Поисковая система по умолчанию',
   'settings.browser.startupSection': 'Запуск',
   'settings.browser.openOnStartup': 'Открывать панель браузера при запуске',
+  'settings.browser.linksSection': 'Ссылки',
+  'settings.browser.openLinksExternally': 'Открывать ссылки в системном браузере',
+  'settings.browser.openLinksExternallyHint': 'Ссылки, нажатые в терминалах и markdown, открываются в браузере по умолчанию вместо панели wmux. Ctrl+щелчок всегда делает наоборот.',
   'settings.browser.devToolsSection': 'Инструменты разработчика',
   'settings.browser.devToolsIcon': 'Значок DevTools',
   'settings.browser.devToolsIcon.default': 'По умолчанию',
@@ -453,6 +456,7 @@ export const ru: Translation = {
   'diffPane.noDiffAvailable': 'Для {file} дифф недоступен',
   // Терминал — режим копирования, строка поиска, уведомление о звонке
   'terminal.bell': 'Звонок терминала',
+  'terminal.uploadFailed': 'Не удалось загрузить на {host}: {reason}',
   'terminal.copyModeHint':
     'РЕЖИМ КОПИРОВАНИЯ — стрелки для перемещения, Shift+стрелки для выделения, Enter для копирования, Esc для выхода',
   'terminal.findPlaceholder': 'Найти...',

@@ -230,6 +230,9 @@ export const sv: Translation = {
   'settings.browser.defaultSearchEngine': 'Standardsökmotor',
   'settings.browser.startupSection': 'Uppstart',
   'settings.browser.openOnStartup': 'Öppna webbläsarpanelen vid uppstart',
+  'settings.browser.linksSection': 'Länkar',
+  'settings.browser.openLinksExternally': 'Öppna länkar i systemwebbläsaren',
+  'settings.browser.openLinksExternallyHint': 'Klickade länkar i terminaler och markdown öppnas i din standardwebbläsare i stället för wmux-panelen. Ctrl+klick gör alltid tvärtom.',
   'settings.browser.devToolsSection': 'Utvecklarverktyg',
   'settings.browser.devToolsIcon': 'DevTools-ikon',
   'settings.browser.devToolsIcon.default': 'Standard',
@@ -442,6 +445,7 @@ export const sv: Translation = {
   'diffPane.noDiffAvailable': 'Ingen diff tillgänglig för {file}',
   // Terminal — kopieringsläge, sökfält, klockaviseringar
   'terminal.bell': 'Terminalklocka',
+  'terminal.uploadFailed': 'Uppladdningen till {host} misslyckades: {reason}',
   'terminal.copyModeHint':
     'KOPIERINGSLÄGE — piltangenter för att flytta, Skift+piltangenter för att markera, Enter för att kopiera, Esc för att avsluta',
   'terminal.findPlaceholder': 'Sök...',

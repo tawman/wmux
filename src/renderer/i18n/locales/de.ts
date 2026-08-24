@@ -230,6 +230,9 @@ export const de: Translation = {
   'settings.browser.defaultSearchEngine': 'Standard-Suchmaschine',
   'settings.browser.startupSection': 'Start',
   'settings.browser.openOnStartup': 'Browser-Panel beim Start öffnen',
+  'settings.browser.linksSection': 'Links',
+  'settings.browser.openLinksExternally': 'Links im Systembrowser öffnen',
+  'settings.browser.openLinksExternallyHint': 'Angeklickte Links in Terminals und Markdown werden im Standardbrowser statt im wmux-Panel geöffnet. Strg+Klick bewirkt immer das Gegenteil.',
   'settings.browser.devToolsSection': 'Entwicklertools',
   'settings.browser.devToolsIcon': 'DevTools-Symbol',
   'settings.browser.devToolsIcon.default': 'Standard',
@@ -442,6 +445,7 @@ export const de: Translation = {
   'diffPane.noDiffAvailable': 'Kein Diff verfügbar für {file}',
   // Terminal — Kopiermodus, Suchleiste, Klingelbenachrichtigung
   'terminal.bell': 'Terminal-Klingel',
+  'terminal.uploadFailed': 'Upload auf {host} fehlgeschlagen: {reason}',
   'terminal.copyModeHint':
     'KOPIERMODUS — Pfeiltasten zum Bewegen, Umschalt+Pfeile zum Auswählen, Eingabe zum Kopieren, Esc zum Beenden',
   'terminal.findPlaceholder': 'Suchen...',

@@ -230,6 +230,9 @@ export const pt: Translation = {
   'settings.browser.defaultSearchEngine': 'Mecanismo de pesquisa padrão',
   'settings.browser.startupSection': 'Inicialização',
   'settings.browser.openOnStartup': 'Abrir painel do navegador na inicialização',
+  'settings.browser.linksSection': 'Ligações',
+  'settings.browser.openLinksExternally': 'Abrir ligações no navegador do sistema',
+  'settings.browser.openLinksExternallyHint': 'As ligações clicadas em terminais e markdown abrem no seu navegador predefinido em vez do painel do wmux. Ctrl+clique faz sempre o contrário.',
   'settings.browser.devToolsSection': 'Ferramentas de desenvolvedor',
   'settings.browser.devToolsIcon': 'Ícone do DevTools',
   'settings.browser.devToolsIcon.default': 'Padrão',
@@ -442,6 +445,7 @@ export const pt: Translation = {
   'diffPane.noDiffAvailable': 'Nenhum diff disponível para {file}',
   // Terminal — modo de cópia, barra de busca, notificação de campainha
   'terminal.bell': 'Campainha do terminal',
+  'terminal.uploadFailed': 'Falha ao enviar para {host}: {reason}',
   'terminal.copyModeHint':
     'MODO DE CÓPIA — Setas para mover, Shift+setas para selecionar, Enter para copiar, Esc para sair',
   'terminal.findPlaceholder': 'Buscar...',

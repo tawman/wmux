@@ -241,6 +241,9 @@ export const uk: Translation = {
   'settings.browser.defaultSearchEngine': 'Пошукова система за замовчуванням',
   'settings.browser.startupSection': 'Запуск',
   'settings.browser.openOnStartup': 'Відкривати панель браузера під час запуску',
+  'settings.browser.linksSection': 'Посилання',
+  'settings.browser.openLinksExternally': 'Відкривати посилання в системному браузері',
+  'settings.browser.openLinksExternallyHint': 'Натиснуті посилання в терміналах і markdown відкриваються у браузері за умовчанням замість панелі wmux. Ctrl+клац завжди робить навпаки.',
   'settings.browser.devToolsSection': 'Інструменти розробника',
   'settings.browser.devToolsIcon': 'Значок DevTools',
   'settings.browser.devToolsIcon.default': 'За замовчуванням',
@@ -453,6 +456,7 @@ export const uk: Translation = {
   'diffPane.noDiffAvailable': 'Для {file} диф недоступний',
   // Термінал — режим копіювання, рядок пошуку, сповіщення про дзвінок
   'terminal.bell': 'Дзвінок термінала',
+  'terminal.uploadFailed': 'Не вдалося завантажити на {host}: {reason}',
   'terminal.copyModeHint':
     'РЕЖИМ КОПІЮВАННЯ — стрілки для переміщення, Shift+стрілки для виділення, Enter для копіювання, Esc для виходу',
   'terminal.findPlaceholder': 'Знайти...',

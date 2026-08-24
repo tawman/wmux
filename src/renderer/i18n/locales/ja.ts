@@ -241,6 +241,9 @@ export const ja: Translation = {
   'settings.browser.defaultSearchEngine': '既定の検索エンジン',
   'settings.browser.startupSection': '起動',
   'settings.browser.openOnStartup': '起動時にブラウザーパネルを開く',
+  'settings.browser.linksSection': 'リンク',
+  'settings.browser.openLinksExternally': 'リンクをシステムのブラウザーで開く',
+  'settings.browser.openLinksExternallyHint': 'ターミナルや Markdown でクリックしたリンクを wmux パネルではなく既定のブラウザーで開きます。Ctrl+クリックは常に逆の動作になります。',
   'settings.browser.devToolsSection': '開発者ツール',
   'settings.browser.devToolsIcon': 'DevTools アイコン',
   'settings.browser.devToolsIcon.default': '既定',
@@ -453,6 +456,7 @@ export const ja: Translation = {
   'diffPane.noDiffAvailable': '{file} の diff は利用できません',
   // ターミナル — コピーモード、検索バー、ベルの通知
   'terminal.bell': 'ターミナルベル',
+  'terminal.uploadFailed': '{host} へのアップロードに失敗しました: {reason}',
   'terminal.copyModeHint':
     'コピーモード — 矢印キーで移動、Shift+矢印で選択、Enter でコピー、Esc で終了',
   'terminal.findPlaceholder': '検索...',

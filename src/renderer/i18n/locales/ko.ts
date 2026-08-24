@@ -247,6 +247,9 @@ export const ko: Translation = {
   'settings.browser.defaultSearchEngine': '기본 검색 엔진',
   'settings.browser.startupSection': '시작',
   'settings.browser.openOnStartup': '시작할 때 브라우저 패널 열기',
+  'settings.browser.linksSection': '링크',
+  'settings.browser.openLinksExternally': '시스템 브라우저에서 링크 열기',
+  'settings.browser.openLinksExternallyHint': '터미널과 마크다운에서 클릭한 링크를 wmux 패널 대신 기본 브라우저에서 엽니다. Ctrl+클릭은 항상 반대로 동작합니다.',
   'settings.browser.devToolsSection': '개발자 도구',
   'settings.browser.devToolsIcon': '개발자 도구 아이콘',
   'settings.browser.devToolsIcon.default': '기본',
@@ -461,6 +464,7 @@ export const ko: Translation = {
   'diffPane.noDiffAvailable': '{file}에 대한 변경 내용이 없습니다',
   // 터미널 — 복사 모드, 찾기 바, 벨 알림
   'terminal.bell': '터미널 벨',
+  'terminal.uploadFailed': '{host}(으)로 업로드하지 못했습니다: {reason}',
   'terminal.copyModeHint':
     '복사 모드 — 방향키로 이동, Shift+방향키로 선택, Enter로 복사, Esc로 종료',
   'terminal.findPlaceholder': '찾기...',

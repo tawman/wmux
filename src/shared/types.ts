@@ -15,7 +15,20 @@ export interface SurfaceRef {
   id: SurfaceId;
   type: SurfaceType;
   customTitle?: string;
+  /**
+   * How this surface was ASKED to start: a bare executable, or a whole command
+   * line such as `ssh user@host` (issue #78). Immutable once set — it is what
+   * respawns the surface after a restart, so anything that overwrites it with
+   * a resolved executable silently breaks restore for every spec that carries
+   * arguments. The tab label wants the resolved value; that is `resolvedShell`.
+   */
   shell?: string;
+  /**
+   * The executable `shell` actually resolved to, reported back by the PTY.
+   * Display only — the tab caption uses it so a pane started with no spec at
+   * all can still say "PowerShell" rather than "Terminal".
+   */
+  resolvedShell?: string;
   /** Per-surface color scheme override (bundled theme name or user-defined scheme name). */
   colorScheme?: string;
   /** Per-surface working directory override (quick-launch profiles — issue #32). */
@@ -301,6 +314,22 @@ export interface SavedSession {
   };
 }
 
+/**
+ * What main decided a paste or drop should type into the terminal.
+ *
+ * The renderer only inserts `text` and reports `failure`; every decision —
+ * is this pane remote, is upload enabled, did scp work — was already made.
+ */
+export interface InsertionResult {
+  /** Text to type, or null when nothing should be inserted. */
+  text: string | null;
+  /**
+   * Set when an upload failed. Carried in pieces rather than as a finished
+   * sentence so the renderer can translate it.
+   */
+  failure?: { destination: string; detail: string };
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // PTY
@@ -311,6 +340,9 @@ export const IPC_CHANNELS = {
   PTY_HAS: 'pty:has',
   PTY_DATA: 'pty:data',
   PTY_EXIT: 'pty:exit',
+  // Remote file upload (ssh panes) — main resolves the whole paste/drop
+  REMOTE_RESOLVE_PASTE: 'remote:resolve-paste',
+  REMOTE_RESOLVE_DROP: 'remote:resolve-drop',
   // Workspace
   WORKSPACE_CREATE: 'workspace:create',
   WORKSPACE_CLOSE: 'workspace:close',
@@ -353,6 +385,11 @@ export const IPC_CHANNELS = {
   WINDOW_MAXIMIZE: 'window:maximize',
   WINDOW_IS_MAXIMIZED: 'window:isMaximized',
   WINDOW_SET_PROGRESS: 'window:setProgress',
+  WINDOW_SET_BACKDROP: 'window:setBackdrop',
+  WINDOW_SUPPORTS_BACKDROP: 'window:supportsBackdrop',
+  WINDOW_CLOSE_SELF: 'window:closeSelf',
+  WINDOW_IS_FRAMELESS: 'window:isFrameless',
+  WINDOW_RELAUNCH: 'window:relaunch',
   // Config
   CONFIG_GET_THEME: 'config:getTheme',
   CONFIG_GET_THEME_LIST: 'config:getThemeList',

@@ -236,6 +236,9 @@ export const zhTW: Translation = {
   'settings.browser.defaultSearchEngine': '預設搜尋引擎',
   'settings.browser.startupSection': '啟動',
   'settings.browser.openOnStartup': '啟動時開啟瀏覽器面板',
+  'settings.browser.linksSection': '連結',
+  'settings.browser.openLinksExternally': '在系統瀏覽器中開啟連結',
+  'settings.browser.openLinksExternallyHint': '在終端機和 Markdown 中點擊的連結會在預設瀏覽器開啟，而非 wmux 面板。Ctrl+點擊一律執行相反的動作。',
   'settings.browser.devToolsSection': '開發者工具',
   'settings.browser.devToolsIcon': '開發者工具圖示',
   'settings.browser.devToolsIcon.default': '預設',
@@ -456,6 +459,7 @@ export const zhTW: Translation = {
   'diffPane.noDiffAvailable': '{file} 沒有可顯示的差異',
   // 終端機 — 複製模式、尋找列、提示音通知
   'terminal.bell': '終端機提示音',
+  'terminal.uploadFailed': '上傳到 {host} 失敗：{reason}',
   'terminal.copyModeHint': '複製模式 — 方向鍵移動，Shift+方向鍵選取，Enter 複製，Esc 離開',
   'terminal.findPlaceholder': '尋找…',
   'terminal.findPrevious': '上一個（Shift+Enter）',

@@ -241,6 +241,9 @@ export const pl: Translation = {
   'settings.browser.defaultSearchEngine': 'Domyślna wyszukiwarka',
   'settings.browser.startupSection': 'Uruchamianie',
   'settings.browser.openOnStartup': 'Otwieraj panel przeglądarki przy starcie',
+  'settings.browser.linksSection': 'Odnośniki',
+  'settings.browser.openLinksExternally': 'Otwieraj odnośniki w przeglądarce systemowej',
+  'settings.browser.openLinksExternallyHint': 'Kliknięte odnośniki w terminalach i markdownie otwierają się w domyślnej przeglądarce zamiast w panelu wmux. Ctrl+kliknięcie zawsze robi odwrotnie.',
   'settings.browser.devToolsSection': 'Narzędzia deweloperskie',
   'settings.browser.devToolsIcon': 'Ikona DevTools',
   'settings.browser.devToolsIcon.default': 'Domyślna',
@@ -453,6 +456,7 @@ export const pl: Translation = {
   'diffPane.noDiffAvailable': 'Brak diffa dla {file}',
   // Terminal — tryb kopiowania, pasek wyszukiwania, dzwonek
   'terminal.bell': 'Dzwonek terminala',
+  'terminal.uploadFailed': 'Przesyłanie na {host} nie powiodło się: {reason}',
   'terminal.copyModeHint':
     'TRYB KOPIOWANIA — strzałki do poruszania się, Shift+strzałki do zaznaczania, Enter do kopiowania, Esc do wyjścia',
   'terminal.findPlaceholder': 'Znajdź...',

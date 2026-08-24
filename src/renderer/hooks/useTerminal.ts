@@ -9,9 +9,11 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { ProgressAddon } from '@xterm/addon-progress';
 import { useStore } from '../store';
 import { useT } from '../i18n';
+import type { Translator } from '../i18n/core';
 import { collectActiveTerminalSurfaceIds } from '../store/split-utils';
-import { SplitNode, SurfaceId, ThemeConfig } from '../../shared/types';
+import { SplitNode, SurfaceId, ThemeConfig, type InsertionResult } from '../../shared/types';
 import { UserColorScheme } from '../store/settings-slice';
+import { terminalBgAlpha } from '../store/backdrop';
 import { activateTerminalLink, terminalLinkHandler } from '../utils/terminal-links';
 import {
   MouseModeState,
@@ -116,6 +118,15 @@ function snapshotSurfaceBuffer(surfaceId: string | undefined, serializeAddon: Se
   }
 }
 
+/**
+ * Record what the PTY actually spawned, for the tab caption.
+ *
+ * Writes `resolvedShell`, NOT `shell`. It used to write `shell`, which is also
+ * the surface's respawn spec: `ssh user@host` was replaced by a bare
+ * `…\ssh.exe`, persisted that way, and a restored ssh workspace then started
+ * an ssh with no destination, printed usage and exited. The label only ever
+ * needed a name to show, so it gets its own field and the spec stays intact.
+ */
 function setResolvedShellForSurface(surfaceId: string | undefined, resolvedShell: string): void {
   if (!surfaceId || !resolvedShell) return;
   const state = useStore.getState();
@@ -123,7 +134,48 @@ function setResolvedShellForSurface(surfaceId: string | undefined, resolvedShell
   if (!workspace) return;
   const location = findSurfaceLocation(workspace.splitTree, surfaceId);
   if (!location) return;
-  state.updateSurface(workspace.id, location.paneId as any, surfaceId as any, { shell: resolvedShell });
+  state.updateSurface(workspace.id, location.paneId as any, surfaceId as any, { resolvedShell });
+}
+
+/**
+ * Type whatever main decided a paste or drop should produce.
+ *
+ * Main resolves the whole gesture — reads its own clipboard, uploads to the
+ * pane's remote host when it is inside ssh, and quotes for the receiving
+ * shell — so there is nothing to decide here. A null text means either
+ * nothing to paste or a reported failure; inserting a local path in the
+ * failure case would read as success while handing the remote shell a path
+ * it cannot open.
+ *
+ * Module scope, not the terminal-setup closure, because BOTH paste bindings
+ * need it: Ctrl+V is intercepted by xterm, while the configurable
+ * `paste` shortcut (Ctrl+Shift+V by default) arrives as a `wmux:paste-terminal`
+ * event on a different effect. They used to disagree — Ctrl+Shift+V read only
+ * text, so a screenshot or a copied file did nothing at all.
+ *
+ * Routed through terminal.paste() so bracketed-paste mode is honored.
+ */
+function applyInsertion(
+  term: Terminal,
+  surfaceId: string | undefined,
+  t: Translator,
+  result: InsertionResult,
+): void {
+  if (result.failure) {
+    window.wmux?.notification?.fire({
+      surfaceId: surfaceId ?? '',
+      // Composed here rather than in main so it can be translated: main hands
+      // back the host and the transport's own complaint, and only the renderer
+      // knows the user's language.
+      text: t('terminal.uploadFailed', 'Upload to {host} failed: {reason}')
+        .replace('{host}', result.failure.destination)
+        .replace('{reason}', result.failure.detail),
+      title: 'wmux',
+    });
+  }
+  if (!result.text) return;
+  term.paste(result.text);
+  try { term.focus(); } catch { /* no-op */ }
 }
 
 /**
@@ -135,21 +187,40 @@ function resolveSchemeName(override: string | undefined, prefsTheme: string | un
 }
 
 /**
+ * A `#rgb` / `#rrggbb` colour as channels, or null for anything else.
+ *
+ * Theme backgrounds are hex, but a user colour scheme can hold any CSS colour,
+ * so callers get null rather than a wrong number and decide what to do with it.
+ */
+export function parseHexColor(color: string): [number, number, number] | null {
+  const hex = (color || '').trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(hex)) {
+    return [
+      parseInt(hex[1] + hex[1], 16),
+      parseInt(hex[2] + hex[2], 16),
+      parseInt(hex[3] + hex[3], 16),
+    ];
+  }
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+    return [
+      parseInt(hex.slice(1, 3), 16),
+      parseInt(hex.slice(3, 5), 16),
+      parseInt(hex.slice(5, 7), 16),
+    ];
+  }
+  return null;
+}
+
+/**
  * Apply an alpha channel to a CSS color for the custom-background feature
  * (issue #89). Theme backgrounds are hex (#rgb/#rrggbb); anything else is
  * returned unchanged rather than risk producing a string xterm can't parse.
  */
 export function withBgAlpha(color: string, alpha: number): string {
   if (alpha >= 1 || !color) return color;
-  const hex = color.trim();
-  let r: number, g: number, b: number;
-  if (/^#[0-9a-fA-F]{3}$/.test(hex)) {
-    r = parseInt(hex[1] + hex[1], 16); g = parseInt(hex[2] + hex[2], 16); b = parseInt(hex[3] + hex[3], 16);
-  } else if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
-    r = parseInt(hex.slice(1, 3), 16); g = parseInt(hex.slice(3, 5), 16); b = parseInt(hex.slice(5, 7), 16);
-  } else {
-    return color;
-  }
+  const rgb = parseHexColor(color);
+  if (!rgb) return color;
+  const [r, g, b] = rgb;
   return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
@@ -352,7 +423,7 @@ function scheduleDeferredRepaint(terminal: Terminal): ReturnType<typeof setTimeo
   }, 300);
 }
 
-async function fetchTheme(name: string): Promise<ThemeConfig> {
+export async function fetchTheme(name: string): Promise<ThemeConfig> {
   const cached = themeCache.get(name);
   if (cached) return cached;
   try {
@@ -380,6 +451,10 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   const ptyIdRef = useRef<string | null>(null);
   const cleanupFnsRef = useRef<Array<() => void>>([]);
   const rendererRef = useRef<RendererHandle | null>(null);
+  // Terminal setup is intentionally mount-once, but translations can change
+  // while an upload is in flight. Completion always reads the current value.
+  const translatorRef = useRef(t);
+  translatorRef.current = t;
   // Captured in a ref so the (mount-once) terminal effect can read the latest
   // startup commands without listing them as a dependency.
   const startupCommandsRef = useRef<string[] | undefined>(startupCommands);
@@ -391,12 +466,31 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
   const prefs = useStore((s) => s.terminalPrefs);
   const schemeName = resolveSchemeName(colorScheme, prefs.theme);
   const userScheme = prefs.userColorSchemes?.[schemeName];
-  // Custom background (issue #89): when enabled, the theme background gets
-  // alpha so the background layer rendered behind the split tree shows through.
+  // The terminal background goes translucent when there is something behind it
+  // worth seeing: the in-app custom background layer (issue #89), or the actual
+  // desktop through a transparent window. Either alone is enough, and with both
+  // on the custom layer is what shows over the blurred desktop.
+  //
+  // Gated on there being a backdrop on purpose — alpha with nothing behind it
+  // just reveals the opaque app chrome, which reads as a rendering bug.
   const appearance = useStore((s) => s.appearancePrefs);
-  const bgAlpha = appearance.customBackgroundEnabled && appearance.customBackground
-    ? Math.max(0.3, Math.min(1, (appearance.terminalBgOpacity ?? 88) / 100))
-    : 1;
+  // Not just the pref: while a restart is pending the window is still opaque,
+  // so alpha here would reveal its flat backgroundColor instead of the desktop.
+  const transparencyPending = useStore((s) => s.transparencyNeedsRestart);
+  const bgAlpha = terminalBgAlpha(appearance, transparencyPending);
+
+  const finishInsertion = (request: Promise<InsertionResult>): void => {
+    void request
+      .then((result) => {
+        // Do not close over the terminal that began the request. A tab can
+        // remount while scp is running; use the current live instance, or drop
+        // the late result after disposal.
+        const currentTerminal = xtermRef.current;
+        if (!currentTerminal || !ptyIdRef.current) return;
+        applyInsertion(currentTerminal, surfaceId, translatorRef.current, result);
+      })
+      .catch(() => { /* nothing pasted rather than something wrong */ });
+  };
 
   const fit = () => {
     if (fitAddonRef.current) {
@@ -555,13 +649,15 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       wheelHost.removeEventListener('wheel', onWheelCapture, { capture: true } as any);
     });
 
+
     // File drag-and-drop → insert the dropped path(s) into the terminal.
     // Windows Terminal and macOS Terminal both do this (issue #33). The browser's
     // DEFAULT drop action is to navigate the window to file:///… which would unload
     // the whole app, so we preventDefault on BOTH dragover (to mark a valid drop
-    // target) and drop. Electron 33 removed File.path, so paths come from the
-    // preload-exposed webUtils bridge (window.wmux.shell.getPathForFile). Paths
-    // are routed through terminal.paste() so bracketed-paste mode is honored,
+    // target) and drop. Electron 33 removed File.path, so genuine DOM File
+    // objects go to preload, where webUtils resolves them without exposing an
+    // arbitrary path-string upload API. Results use terminal.paste() so
+    // bracketed-paste mode is honored,
     // matching the Ctrl+V / image-paste handlers below.
     const dropHost = terminalRef.current;
     const onDragOver = (ev: DragEvent) => {
@@ -575,18 +671,13 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
       if (!files || files.length === 0) return;
       ev.preventDefault();
       ev.stopPropagation();
-      const getPath = window.wmux?.shell?.getPathForFile;
-      if (!getPath) return;
-      const parts: string[] = [];
-      for (let i = 0; i < files.length; i++) {
-        const p = getPath(files[i]);
-        // Quote paths containing spaces so they survive as a single shell token.
-        if (p) parts.push(/\s/.test(p) ? `"${p}"` : p);
-      }
-      if (parts.length > 0 && ptyIdRef.current) {
-        terminal.paste(parts.join(' '));
-        try { terminal.focus(); } catch { /* no-op */ }
-      }
+      // Shift inverts: insert the local path even when the pane is remote.
+      // Drop only — Ctrl+Shift+V is already the paste binding, so Shift is
+      // not free as a paste modifier (cmux scopes it to drop for the same
+      // reason).
+      finishInsertion(
+        window.wmux.remote.resolveDrop(surfaceId ?? '', Array.from(files), ev.shiftKey),
+      );
     };
     dropHost.addEventListener('dragover', onDragOver);
     dropHost.addEventListener('drop', onDrop);
@@ -745,33 +836,16 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
           return false;
         }
       }
-      // Ctrl+V: paste text from clipboard (or image path if clipboard has image)
+      // Ctrl+V: main reads the clipboard and tells us what to type.
       if (event.type === 'keydown' && event.ctrlKey && event.key === 'v') {
         // Prevent the browser 'paste' event — without this, xterm's built-in
         // paste handler ALSO writes the clipboard content through onData,
         // causing the text to appear twice in the terminal.
         event.preventDefault();
-        (async () => {
-          // Check for image first
-          let handled = false;
-          if (window.wmux?.clipboard?.pasteImage) {
-            const filePath = await window.wmux.clipboard.pasteImage();
-            if (filePath && ptyIdRef.current) {
-              // Route through terminal.paste so bracketed-paste markers wrap
-              // the path when the app (e.g. Claude Code) has bracketed paste on.
-              terminal.paste(filePath);
-              handled = true;
-            }
-          }
-          // If no image, paste text via Electron's clipboard API — navigator.clipboard
-          // can return garbled bytes on Windows when the source wrote a non-UTF-8 format.
-          if (!handled && ptyIdRef.current) {
-            try {
-              const text = await window.wmux.clipboard.readText();
-              if (text) terminal.paste(text);
-            } catch {}
-          }
-        })();
+        // One round trip. An image, a copied file and plain text are all the
+        // same question — 'what should this paste type?' — and only main can
+        // answer it, because only main can upload the first two.
+        finishInsertion(window.wmux.remote.resolvePaste(surfaceId ?? ''));
         return false; // Prevent default — we handle paste ourselves
       }
       // Shift+Enter → newline for TUI apps (Claude Code, etc). See
@@ -1056,21 +1130,21 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     };
   }, []);
 
-  // Paste delegated from the keyboard-shortcut handler (e.g. Ctrl+Shift+V).
-  // Routed here so it shares the Ctrl+V path's correctness: Electron's
-  // clipboard.readText() (navigator.clipboard garbles non-UTF-8 Windows
-  // formats — em dash → "â") and terminal.paste() (honors bracketed-paste
-  // mode, so multi-line paste into Claude Code doesn't submit on the first \n).
+  // Paste delegated from the keyboard-shortcut handler — the configurable
+  // `paste` action, Ctrl+Shift+V by default.
+  //
+  // Goes through the SAME resolver as Ctrl+V. It used to read only text, so
+  // the two bindings quietly meant different things: with a screenshot or an
+  // Explorer-copied file on the clipboard, Ctrl+V uploaded it and
+  // Ctrl+Shift+V did nothing at all. There is no reason for them to differ —
+  // Shift is not an invert modifier here (it cannot be, it is part of the
+  // binding), so both are plain "paste whatever is on the clipboard".
   useEffect(() => {
     const handler = async (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.surfaceId !== surfaceId) return;
-      const term = xtermRef.current;
-      if (!term || !ptyIdRef.current) return;
-      try {
-        const text = await window.wmux.clipboard.readText();
-        if (text) term.paste(text);
-      } catch {}
+      if (!xtermRef.current || !ptyIdRef.current) return;
+      finishInsertion(window.wmux.remote.resolvePaste(surfaceId ?? ''));
     };
     document.addEventListener('wmux:paste-terminal', handler);
     return () => document.removeEventListener('wmux:paste-terminal', handler);
@@ -1110,7 +1184,15 @@ export function useTerminal({ surfaceId, shell, cwd, visible = true, focused = t
     let cancelled = false;
     fetchTheme(schemeName).then((base) => {
       if (cancelled || !xtermRef.current) return;
-      xtermRef.current.options.theme = buildXtermTheme(base, userScheme, bgAlpha);
+      const theme = buildXtermTheme(base, userScheme, bgAlpha);
+      xtermRef.current.options.theme = theme;
+      // xterm paints the theme background on .xterm-scrollable-element, which
+      // sits INSIDE .xterm's 2px padding — so over a translucent window that
+      // padding was a fully see-through frame around every pane. Publishing the
+      // exact colour the terminal just took lets the container fill it, and it
+      // is per-pane on purpose: a pane with its own --color-scheme has to match
+      // itself, not the global theme.
+      terminalRef.current?.style.setProperty('--wmux-term-bg', theme.background ?? 'transparent');
     });
     // Font + cursor + scrollback can be applied synchronously.
     term.options.fontFamily = prefs.fontFamily || term.options.fontFamily;

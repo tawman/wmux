@@ -241,6 +241,9 @@ export const tr: Translation = {
   'settings.browser.defaultSearchEngine': 'Varsayılan arama motoru',
   'settings.browser.startupSection': 'Başlangıç',
   'settings.browser.openOnStartup': 'Başlangıçta tarayıcı panelini aç',
+  'settings.browser.linksSection': 'Bağlantılar',
+  'settings.browser.openLinksExternally': 'Bağlantıları sistem tarayıcısında aç',
+  'settings.browser.openLinksExternallyHint': 'Terminallerde ve markdown içinde tıklanan bağlantılar wmux paneli yerine varsayılan tarayıcınızda açılır. Ctrl+tıklama her zaman tersini yapar.',
   'settings.browser.devToolsSection': 'Geliştirici Araçları',
   'settings.browser.devToolsIcon': 'DevTools simgesi',
   'settings.browser.devToolsIcon.default': 'Varsayılan',
@@ -453,6 +456,7 @@ export const tr: Translation = {
   'diffPane.noDiffAvailable': '{file} için fark yok',
   // Terminal — kopyalama modu, bulma çubuğu, zil bildirimi
   'terminal.bell': 'Terminal zili',
+  'terminal.uploadFailed': '{host} sunucusuna yükleme başarısız: {reason}',
   'terminal.copyModeHint':
     'KOPYALAMA MODU — hareket için ok tuşları, seçim için Shift+oklar, kopyalamak için Enter, çıkmak için Esc',
   'terminal.findPlaceholder': 'Bul...',

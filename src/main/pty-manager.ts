@@ -10,6 +10,8 @@ import { PtyLedger } from './pty-ledger';
 import { attachErrorSink, installPtyCrashGuard } from './pty-crash-guard';
 import { powerShellShimDir } from './powershell-shim';
 import { getCliBinPath } from './cli-paths';
+import { getNodeRuntime } from './node-runtime';
+import { system32, opensshPath } from './system32';
 
 // Applied once, at load, before any PTY can exist — the exit callback it guards
 // is registered by node-pty inside pty.spawn(), so a later install would leave
@@ -164,17 +166,32 @@ export function resolveExistingShellPath(shell: string): string | undefined {
 
 function resolveExistingShellPathUncached(shell: string): string | undefined {
   if (path.isAbsolute(shell) && fs.existsSync(shell)) return shell;
+
+  const win32 = process.platform === 'win32';
+  const base = win32 ? path.basename(shell).toLowerCase().replace(/\.exe$/, '') : '';
+
+  // Before PATH, and only for a bare name — an absolute path the user wrote
+  // already won above. `wmux ssh user@host` and a workspace shell set to
+  // `ssh …` must get Windows' own ssh, not whichever build happens to be
+  // first on PATH; see opensshPath for why the two are not interchangeable.
+  //
+  // Only shell SPECS reach here. A command the user types at a prompt is
+  // resolved by the shell inside the PTY, so panes keep behaving like every
+  // other terminal.
+  if (base === 'ssh') {
+    const native = opensshPath('ssh');
+    if (fs.existsSync(native)) return native;
+  }
+
   const onPath = shellProbe.onPath(shell);
   if (onPath) return onPath;
+
   // Bare alias with no real PATH hit. A Store-only PowerShell — stable or
   // preview — is reachable only as an App Execution Alias, so `where` finds it
   // and existsSync refuses it. Without this the stable case silently fell all
   // the way back to Windows PowerShell 5.1.
-  if (process.platform === 'win32') {
-    const base = path.basename(shell).toLowerCase().replace(/\.exe$/, '');
-    if (base === 'pwsh-preview') return findStorePwsh(true);
-    if (base === 'pwsh') return findStorePwsh(false);
-  }
+  if (base === 'pwsh-preview') return findStorePwsh(true);
+  if (base === 'pwsh') return findStorePwsh(false);
   return undefined;
 }
 
@@ -484,6 +501,13 @@ export class PtyManager {
     const processEnvClean = Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
     );
+    // WMUX_CLI is a .js path, so anything that wants to RUN it needs a JS
+    // runtime too — and the host process is not reliably one (issue #187:
+    // OpenCode's `process.execPath` is the compiled `opencode.exe`, and node
+    // can be installed yet absent from the PATH a given agent inherited).
+    // wmux resolves it once, in the process best placed to look, and declares
+    // the answer alongside the script it applies to.
+    const nodeRuntime = getNodeRuntime();
     const env: { [key: string]: string } = {
       ...processEnvClean,
       ...options.env,
@@ -492,7 +516,13 @@ export class PtyManager {
       WMUX_PIPE: getPipePath(),
       WMUX_PIPE_TOKEN: readPipeToken(),
       WMUX_CLI: cliPath,
+      WMUX_NODE: nodeRuntime.path,
     };
+    // Only set when true. A consumer that spawns WMUX_NODE without honouring
+    // this opens a second wmux window instead of running a script, so the
+    // variable's presence — not its value — is the signal, and an absent one
+    // must never read as "yes".
+    if (nodeRuntime.electron) env.WMUX_NODE_ELECTRON = '1';
 
     // Make bare `wmux` resolvable in every spawned shell AND all its children
     // (Claude Code's Bash tool, hook scripts, the orchestrator coordinator) by
@@ -712,10 +742,9 @@ export class PtyManager {
     // and survives even when this runs from killAll() on app quit.
     if (process.platform === 'win32' && typeof pid === 'number' && pid > 0) {
       try {
-        // Resolve taskkill by absolute path from %SystemRoot%\System32 rather than
-        // relying on PATH — PATH could contain a writeable dir shadowing taskkill.
-        const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-        const taskkillPath = path.join(systemRoot, 'System32', 'taskkill.exe');
+        // Absolute path rather than PATH — a writeable dir on PATH could
+        // otherwise shadow taskkill.
+        const taskkillPath = system32('taskkill.exe');
         const killer = spawn(taskkillPath, ['/PID', String(pid), '/T', '/F'], {
           windowsHide: true,
           detached: true,
@@ -783,5 +812,10 @@ export class PtyManager {
   getPid(id: SurfaceId): number | undefined {
     const entry = this.ptys.get(id);
     return entry?.pty.pid;
+  }
+
+  /** Every surface with a live PTY. Used by the ssh probe to map processes back to panes. */
+  liveSurfaceIds(): SurfaceId[] {
+    return Array.from(this.ptys.keys());
   }
 }

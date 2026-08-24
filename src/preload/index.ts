@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import * as os from 'os';
-import { IPC_CHANNELS } from '../shared/types';
+import { IPC_CHANNELS, type InsertionResult } from '../shared/types';
 
 contextBridge.exposeInMainWorld('wmux', {
   pty: {
@@ -105,8 +105,44 @@ contextBridge.exposeInMainWorld('wmux', {
       return () => ipcRenderer.removeListener(IPC_CHANNELS.AGENT_UPDATE, handler);
     },
   },
+  remote: {
+    /**
+     * What should Ctrl+V type into this surface? Main reads its own
+     * clipboard, uploads to the remote host if the pane is inside ssh, and
+     * returns the finished text.
+     */
+    resolvePaste: (surfaceId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_RESOLVE_PASTE, surfaceId) as Promise<InsertionResult>,
+    /**
+     * Same, for files dropped on the pane. Resolve paths here, while the
+     * original DOM File objects are still available. Accepting path strings
+     * from the renderer would turn this into an arbitrary local-file upload
+     * capability if renderer content were ever compromised.
+     */
+    resolveDrop: (surfaceId: string, files: File[], invert: boolean) => {
+      const localPaths: string[] = [];
+      if (Array.isArray(files)) {
+        for (const file of files) {
+          try {
+            const localPath = webUtils.getPathForFile(file);
+            if (localPath) localPaths.push(localPath);
+          } catch {
+            // A forged value is not a dropped File and grants no path.
+          }
+        }
+      }
+      return ipcRenderer.invoke(
+        IPC_CHANNELS.REMOTE_RESOLVE_DROP,
+        surfaceId,
+        localPaths,
+        Boolean(invert),
+      ) as Promise<InsertionResult>;
+    },
+  },
   clipboard: {
-    pasteImage: () => ipcRenderer.invoke('clipboard:paste-image'),
+    // No pasteImage/readFiles: reading the clipboard for a paste is main's
+    // job now (remote.resolvePaste), because only main can act on what it
+    // finds. These remain for copy and older renderer call sites.
     writeText: (text: string) => ipcRenderer.invoke('clipboard:write-text', text),
     readText: () => ipcRenderer.invoke('clipboard:read-text') as Promise<string>,
   },
@@ -278,5 +314,17 @@ contextBridge.exposeInMainWorld('wmux', {
     // Windows taskbar progress (OSC 9;4 aggregate). value 0-1, or -1 to remove.
     setProgress: (value: number, mode?: string) =>
       ipcRenderer.send(IPC_CHANNELS.WINDOW_SET_PROGRESS, value, mode),
+    // Window transparency (Win11 acrylic/mica backdrop).
+    setBackdrop: (
+      enabled: boolean,
+      material: 'clear' | 'acrylic' | 'mica',
+    ): Promise<{ needsRestart: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SET_BACKDROP, enabled, material),
+    supportsBackdrop: (): Promise<{ transparency: boolean; materials: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_SUPPORTS_BACKDROP),
+    // For the renderer-drawn caption buttons a frameless window needs.
+    closeSelf: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_CLOSE_SELF),
+    isFrameless: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_FRAMELESS),
+    relaunch: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_RELAUNCH),
   },
 });

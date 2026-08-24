@@ -230,6 +230,9 @@ export const nl: Translation = {
   'settings.browser.defaultSearchEngine': 'Standaardzoekmachine',
   'settings.browser.startupSection': 'Opstarten',
   'settings.browser.openOnStartup': 'Browserpaneel openen bij opstarten',
+  'settings.browser.linksSection': 'Links',
+  'settings.browser.openLinksExternally': 'Links openen in de systeembrowser',
+  'settings.browser.openLinksExternallyHint': 'Aangeklikte links in terminals en markdown openen in je standaardbrowser in plaats van het wmux-paneel. Ctrl+klik doet altijd het omgekeerde.',
   'settings.browser.devToolsSection': 'Ontwikkelaarstools',
   'settings.browser.devToolsIcon': 'DevTools-pictogram',
   'settings.browser.devToolsIcon.default': 'Standaard',
@@ -442,6 +445,7 @@ export const nl: Translation = {
   'diffPane.noDiffAvailable': 'Geen diff beschikbaar voor {file}',
   // Terminal — kopieermodus, zoekbalk, belmelding
   'terminal.bell': 'Terminalbel',
+  'terminal.uploadFailed': 'Uploaden naar {host} mislukt: {reason}',
   'terminal.copyModeHint':
     'KOPIEERMODUS — pijltjestoetsen om te bewegen, Shift+pijltjes om te selecteren, Enter om te kopiëren, Esc om af te sluiten',
   'terminal.findPlaceholder': 'Zoeken...',

@@ -226,6 +226,9 @@ export const zh: Translation = {
   'settings.browser.defaultSearchEngine': '默认搜索引擎',
   'settings.browser.startupSection': '启动',
   'settings.browser.openOnStartup': '启动时打开浏览器面板',
+  'settings.browser.linksSection': '链接',
+  'settings.browser.openLinksExternally': '在系统浏览器中打开链接',
+  'settings.browser.openLinksExternallyHint': '在终端和 Markdown 中点击的链接将在默认浏览器中打开，而不是 wmux 面板。Ctrl+点击始终执行相反操作。',
   'settings.browser.devToolsSection': '开发者工具',
   'settings.browser.devToolsIcon': 'DevTools 图标',
   'settings.browser.devToolsIcon.default': '默认',
@@ -438,6 +441,7 @@ export const zh: Translation = {
   'diffPane.noDiffAvailable': '{file} 没有可用的差异',
   // 终端 — 复制模式、查找栏、响铃通知
   'terminal.bell': '终端响铃',
+  'terminal.uploadFailed': '上传到 {host} 失败：{reason}',
   'terminal.copyModeHint': '复制模式 — 方向键移动，Shift+方向键选择，回车复制，Esc 退出',
   'terminal.findPlaceholder': '查找...',
   'terminal.findPrevious': '上一个 (Shift+Enter)',

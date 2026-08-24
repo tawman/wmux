@@ -4,7 +4,7 @@ Electron-based Windows terminal multiplexer for AI agents. TypeScript, React 19,
 
 **Owner**: amirlehmam (GitHub) — speaks French, prefers fast pragmatic solutions, tests live.
 **Repo**: github.com/amirlehmam/wmux | **Site**: wmux.org (Netlify, static from `site/`)
-**Version**: 1.8.0
+**Version**: 1.13.0
 
 ---
 
@@ -120,6 +120,7 @@ docs/             Planning docs
 | `claude-context.ts` | Injects wmux instructions into `~/.claude/CLAUDE.md`, configures hooks, installs wmux-orchestrator plugin — **and the inverse of each**, since 0.40.0 |
 | `agent-integration.ts` | Consent gate for every write outside `%APPDATA%\wmux` (issue #132). Asks on first launch, stores `unset`/`granted`/`declined` in wmux's own settings.json, and reconciles `~/.claude` + `~/.config/opencode` + `~/.kiro` to match. Nothing in `claude-context.ts`, `opencode-context.ts` or `kiro-context.ts` may be called directly from startup any more — route it through here |
 | `kiro-context.ts` | Kiro CLI support (issue #148). Writes `~/.kiro/steering/wmux.md` — a dedicated global steering file, since Kiro loads every `.md` in that dir, so there is no shared file to splice into. No hooks: Kiro's are per-project (`.kiro/hooks/`), and writing into every repo the user opens is the #132 mistake. State comes from `wmux report-agent` instead |
+| `opencode-context.ts` | Installs `resources/opencode-plugin/wmux.js` into `~/.config/opencode/plugin/`, gated on the `// wmux-plugin-version:` marker (`pluginNeedsUpdate` compares it verbatim, so any change to the plugin needs a bump or it reaches nobody — every broken install already has the old file on disk). **That plugin file must export `WmuxPlugin` and nothing else** (#191): OpenCode's auto-discovery loader calls EVERY export as a plugin factory and then invokes a `config` hook on the result, so an exported helper returning a plain value crashes OpenCode at startup. Helpers hang off `WmuxPlugin.__wmuxInternals` for the tests; a source-level test pins the export count |
 | `claude-observer.ts` | Monitors Claude Code activity for sidebar display |
 | `claude-resume.ts` | `claude --resume` on workspace restore (#186), behind `workspacePrefs.restoreClaudeSessions` (**default off** — every such pane starts an agent at once). Stamps each terminal's live session id into the PERSISTED tree only, the way `freezeSurfaceCwds` stamps cwd; a live surface never carries one. Main-side rather than renderer-side because the id lives in `agent-state.ts`'s record map. The id reaches a command line, so `CLAUDE_SESSION_ID_RE` is a security boundary, enforced at `reportAgentSession` AND again in `claude-resume-command.ts` (session.json is user-editable). `handleHookEvent` must skip `SessionEnd`: it carries a session_id like every hook, but `releaseAgent()` has just run for it, and recording there would resume a Claude the user deliberately quit |
 | `agent-state.ts` | Declared agent run state — blocked/working/idle, run refcount, `seq` dedupe, metadata TTL (issue #128). Also the back-channel: declared `choices` + `answerAgent`. **Answering never clears `blocked`** — the agent must confirm, or a mis-declared key silently stops a stuck pane asking for help |
@@ -128,9 +129,16 @@ docs/             Planning docs
 | `session-persistence.ts` | Auto-save/restore window state |
 | `port-scanner.ts` | Active port detection for running dev servers |
 | `powershell-shim.ts` | The `wmux.ps1` gate (issue #154). PowerShell resolves a .ps1 ahead of every PATHEXT entry, which is how cmd.exe's argument parser is kept out of the PowerShell path — but a .ps1 PowerShell refuses (Restricted policy, or Mark of the Web under RemoteSigned) is a hard error with NO fallback to the .cmd beside it. So the shim dir goes on PATH only after a probe script in that same dir has actually run in every installed host |
+| `node-runtime.ts` | Which binary on this machine can run a `.js` file (#187). Everything wmux hands an agent is "a script plus something to run it", and every consumer had been assuming `node` was on PATH or that the host process was itself a JS runtime — false under OpenCode, whose `process.execPath` is a compiled `opencode.exe`. Resolved once (memoised: it is read on the synchronous pane-create path, see #176) and declared as `WMUX_NODE`. The last resort is wmux's own Electron binary, which is Node under `ELECTRON_RUN_AS_NODE=1`, so the chain never dead-ends — but that flag is what makes it a runtime instead of a second wmux window, hence the separate `WMUX_NODE_ELECTRON` signal |
+| `ssh-argv.ts` | Parses an ssh command line into the facts scp needs to reach the same host (#195). Pure, and the single funnel for all three detection sources so they cannot disagree about what a command line means. Returning **null is the safe outcome** — a mis-parse does not fail loudly, it uploads a file to the wrong host — so port forwards (`-N`/`-W`), one-shot remote commands and `RequestTTY=no` all abandon the parse rather than guess |
+| `ssh-detect.ts` | Is this surface sitting inside ssh, and where? Three layers: **managed** (`wmux ssh` put the command line in the shell spec), **reported** (shell-integration preexec hook), **probed** (`Win32_Process` ancestry sweep). The precedence rule is a security boundary, not a preference: Windows has no tty foreground process group, so a descendant `ssh.exe` may be a *background* process — the probe may only corroborate an authoritative layer, never establish one. `refresh()` short-circuits with no sweep when neither authoritative layer has an entry, because it runs on the paste path |
+| `remote-upload.ts` | scp/ssh argv construction and the transfer itself. `BatchMode=yes` throughout: these run with no TTY, so a passphrase prompt would hang to the timeout. All-or-nothing — a failed batch deletes its private `/tmp/wmux-drop-<uuid>/` before returning, since half a batch gives the user remote paths and silence with no way to tell which is which |
+| `remote-insert.ts` | What a paste or drop types into a terminal. Lives in main because every input to the decision does (clipboard, detector, filesystem, scp, config). Quoting is per-side: Windows-conditional locally, always single-quoted for a remote sh |
+| `win32-process.ts` | One `Get-CimInstance Win32_Process` invocation for both the orphan reaper and the ssh probe. Shared so the security-relevant part — resolving `powershell.exe` by ABSOLUTE path, so a writeable PATH dir cannot shadow it — is stated once |
+| `system32.ts` | Absolute paths to Windows-owned tools. `opensshPath()` prefers Program Files OpenSSH over System32 (#193): Git for Windows puts an MSYS2 ssh ahead of System32 on PATH, and it cannot talk to the Windows named-pipe ssh-agent — so a bare `ssh` spec died on "Permission denied (publickey)" wherever keys live only in an agent |
 | `shell-context-menu.ts` | "Open in wmux" Explorer verb — HKCU shell keys for Directory/Directory\Background/Drive, plus `directoryFromArgv` for the launch path. Win11 places it under "Show more options"; the modern menu needs a signed MSIX, which unsigned wmux cannot ship |
 | `theme-loader.ts` | Theme loading |
-| `config-loader.ts` | WT/Ghostty config import |
+| `config-loader.ts` | WT/Ghostty config import. Reachable from Settings → Terminal → Import. WT spells opacity two ways — modern `opacity` (0-100, independent of `useAcrylic`) and pre-1.12 `acrylicOpacity` (0-1, only with `useAcrylic`) |
 | `shell-detector.ts` | Available shells detection |
 | `updater.ts` | Auto-update. Routes by install layout: NSIS → `electron-updater`, portable zip → `zip-updater.ts` (#184). `initAutoUpdater()` returns before registering `NsisUpdater` on a zip extract, so a portable install can never enter the #96 "update ready" loop |
 | `zip-updater.ts` | In-place update for portable zip extracts (#184). Detection is the whole contract: `wmux.exe` present, `Uninstall wmux.exe` absent — that name is electron-builder's `Uninstall ${productFilename}.exe`, so it moves if `productName`/`executableName` ever change. Download via `net.request`, extract via System32 `tar.exe` (PowerShell `Expand-Archive` fallback), then a detached cmd helper waits on the old PID and robocopies over the install root. The helper's relaunch is **unconditional** — wmux has already quit, so bailing out on a copy failure is the one outcome the user can't recover from |
@@ -176,13 +184,23 @@ metadata: onUpdate
 notification: fire, onFocusSurface
 browser:  navigate
 agent:    list, status, onUpdate
-clipboard: pasteImage
+clipboard: writeText, readText    # no pasteImage since 1.12.0 — see remote below
+remote:   resolvePaste, resolveDrop  # what should this gesture type? Main answers
+                                     # the WHOLE question (clipboard read, ssh
+                                     # detection, scp, quoting) because only main
+                                     # can act on any of it. resolveDrop takes DOM
+                                     # File objects, never path strings: accepting
+                                     # paths would be an arbitrary local-file
+                                     # upload API for a compromised renderer
 hook:     onEvent
 claudeActivity: onUpdate
 agentState: onUpdate   # declared blocked/working/idle (issue #128)
 session:  save, load, list, delete
 cdp:      attach, detach
-window:   create, close, focus, list, minimize, maximize, isMaximized
+window:   create, close, focus, list, minimize, maximize, isMaximized, setProgress,
+          setBackdrop, supportsBackdrop,    # window transparency (clear/acrylic/mica)
+          closeSelf, isFrameless, relaunch  # clear mode is frameless: own caption
+                                            # buttons, and the restart banner
 ```
 
 ---
@@ -381,7 +399,7 @@ The pipe server in `index.ts` handles V2 JSON-RPC methods. Most delegate to the 
 
 **Fully implemented V2 methods:**
 - `system.identify`, `system.capabilities`, `system.tree`
-- `workspace.create`, `workspace.close`, `workspace.select`, `workspace.rename`, `workspace.list`
+- `workspace.create`, `workspace.close`, `workspace.select`, `workspace.rename`, `workspace.list`, `workspace.current`
 - `pane.split`, `pane.close`, `pane.focus`, `pane.zoom`, `pane.list`
 - `surface.create`, `surface.close`, `surface.focus`, `surface.rename`, `surface.list`
 - `surface.send_text`, `surface.send_key`, `surface.read_text`, `surface.trigger_flash`
@@ -434,6 +452,10 @@ wmux new-window | list-windows | focus-window <id>
 # Workspaces
 wmux new-workspace [--title T] [--shell S] [--cwd D]   # --shell accepts args: --shell "ssh user@host"
 wmux close-workspace | select-workspace | rename-workspace | list-workspaces
+wmux current-workspace [--surface <id>]                # alias: whoami — the caller's OWN
+                                       # workspace {id,title,cwd,shell,surfaceId}.
+                                       # Explicit error on an unknown surface, rather than the
+                                       # focused workspace `list-workspaces` reports as active
 wmux ssh [ssh options] <user@host> [--title T]         # remote terminal in a new workspace (issue #78)
 
 # Remote wmux management (issue #78): drive another machine's wmux over an SSH tunnel
@@ -508,6 +530,7 @@ All defined in `src/shared/types.ts` → `IPC_CHANNELS`:
 
 ```
 PTY:     pty:create, pty:write, pty:resize, pty:kill, pty:has, pty:data, pty:exit
+Remote:  remote:resolve-paste, remote:resolve-drop   # ssh file upload (issue #195)
 Window:  window:create/close/focus/list/minimize/maximize/isMaximized
 Config:  config:getTheme/getThemeList/importWindowsTerminal/importGhostty
 System:  system:getShells/openExternal
@@ -530,7 +553,8 @@ Scripts in `src/shell-integration/` (deployed to `resources/shell-integration/`)
 | `wmux-bash-integration.sh` | cwd, git branch/dirty, shell state, ports |
 | `wmux-cmd-integration.cmd` | Basic OSC 9 escape sequences |
 
-Env vars set by wmux in spawned shells: `WMUX=1`, `WMUX_SURFACE_ID`, `WMUX_PIPE`, `WMUX_CLI`.
+Env vars set by wmux in spawned shells: `WMUX=1`, `WMUX_SURFACE_ID`, `WMUX_PIPE`, `WMUX_CLI`,
+`WMUX_NODE` (+ `WMUX_NODE_ELECTRON` when it is wmux's own binary — issue #187).
 
 ---
 
