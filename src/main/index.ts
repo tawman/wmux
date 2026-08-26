@@ -5,12 +5,20 @@ import { handleDetectionV2 } from './detection-rpc';
 import { isPtyCrashGuardInstalled } from './pty-manager';
 import { logDiagnostic } from './crash-diagnostics';
 import { handleBrowserV2 } from './v2-browser';
+import { pickBrowserSurface } from './browser-engine-surface';
+import {
+  agentBrowserNeedsTeardown,
+  agentBrowserTeardownDeps,
+  QUIT_TEARDOWN_BUDGET_MS,
+  reconcileOrphanSessions,
+  teardownAgentBrowser,
+} from './agent-browser-runtime';
 import { handleBridgeV2 } from './v2-bridge';
 import { distributeAgents } from './agent-manager';
 import { PipeServer } from './pipe-server';
 import { PortScanner } from './port-scanner';
 import { CDPProxy } from './cdp-proxy';
-import { IPC_CHANNELS, SurfaceId } from '../shared/types';
+import { IPC_CHANNELS, SurfaceId, BrowserEngine } from '../shared/types';
 import { getPipePath, getAppDataDir, ensurePipeToken } from '../shared/instance';
 import { loadSession, saveSession, handleVersionChange, SessionData } from './session-persistence';
 import { getAgentState, reportAgentSession } from './agent-state';
@@ -36,6 +44,206 @@ import { ensurePowerShellShim } from './powershell-shim';
 import fs from 'fs';
 import path from 'path';
 
+// ─── browser.get_engine / browser.set_engine ────────────────────────────────
+//
+// These are handled here rather than in v2-browser.ts's `handleBrowserV2`
+// (out of scope for this change) even though their names start with
+// `browser.` — `routeSpecialV2` below checks for them BEFORE the generic
+// `browser.*` delegation, or they would fall into `runBrowserCommandForTarget`'s
+// verb switch and be rejected as `Unknown: browser.get_engine`.
+
+/** What resolving a terminal `caller` to ITS bound browser surface found. */
+type CallerBrowserResolution =
+  | { kind: 'found'; surfaceId: string }
+  // No browser surface exists yet in the caller's workspace. Carries the
+  // window + workspaceId so a `set` can create one there; a `get` just
+  // answers 'web' without creating anything (see handleBrowserEngineV2).
+  | { kind: 'none'; win: BrowserWindow; workspaceId: string }
+  | { kind: 'ambiguous' }
+  | { kind: 'unresolved' };
+
+/**
+ * Resolve which browser surface a terminal `caller` (e.g. $WMUX_SURFACE_ID) is
+ * effectively bound to, for `browser.get_engine` / `browser.set_engine`.
+ *
+ * `wmux browser <verb>` already resolves a caller to ITS OWN browser surface
+ * (issue #62) — but that binding (`callerBrowserSurface` in v2-browser.ts) is
+ * a private module-level map in a file this change does not touch. So this
+ * does NOT read or write that map; it re-derives an answer from the same
+ * renderer bridge globals v2-browser.ts's `resolveBrowserWcId` uses
+ * (`__wmux_getWorkspaceIdForSurface`, `__wmux_listBrowserSurfaces`,
+ * `__wmux_splitPane`) — the ones that actually own the split-tree state.
+ *
+ * That is safe, not just convenient: a surface this creates is never added to
+ * v2-browser.ts's private `boundBrowserSurfaces` set either, so it is still
+ * "unowned" and gets adopted normally the first time the same caller runs a
+ * REAL browser verb — the two paths agree without sharing state.
+ *
+ * More than one existing browser surface in the caller's workspace (e.g. two
+ * agents that already each own one) is refused rather than guessed at:
+ * silently picking one risks flipping the WRONG agent's browser, exactly the
+ * cross-talk issue #62 exists to prevent.
+ */
+async function resolveCallerBrowserSurface(caller: string): Promise<CallerBrowserResolution> {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const workspaceId: string | null = await win.webContents.executeJavaScript(
+      `window.__wmux_getWorkspaceIdForSurface?.(${JSON.stringify(caller)}) ?? null`,
+    );
+    if (!workspaceId) continue;
+    const existing: string[] = await win.webContents.executeJavaScript(
+      `window.__wmux_listBrowserSurfaces?.(${JSON.stringify(workspaceId)}) ?? []`,
+    );
+    const picked = pickBrowserSurface(caller, existing);
+    if (picked.kind !== 'none') return picked;
+    return { kind: 'none', win, workspaceId };
+  }
+  return { kind: 'unresolved' };
+}
+
+/** Ask every window whether `surfaceId` is a browser surface, and its engine. */
+async function readBrowserEngine(surfaceId: string): Promise<BrowserEngine> {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const engine = await win.webContents.executeJavaScript(
+      `window.__wmux_getBrowserEngine?.(${JSON.stringify(surfaceId)}) ?? 'web'`,
+    );
+    if (engine === 'agent') return 'agent';
+  }
+  return 'web';
+}
+
+/** Ask every window to flip `surfaceId`'s engine. True the moment one takes it. */
+async function writeBrowserEngine(surfaceId: string, engine: BrowserEngine): Promise<boolean> {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const ok = await win.webContents.executeJavaScript(
+      `window.__wmux_setBrowserEngine?.(${JSON.stringify(surfaceId)}, ${JSON.stringify(engine)}) ?? false`,
+    );
+    if (ok) return true;
+  }
+  return false;
+}
+
+/**
+ * Failure branches shared by get/set once a `caller` (no explicit
+ * `surfaceId`) needs resolving. Split out of the get/set handlers below
+ * purely to keep each of THEIR cognitive complexity down — every branch here
+ * ends in `respondError` and returns, so the caller only has to check for a
+ * truthy return to know whether it already answered.
+ */
+function respondResolutionFailure(
+  method: string,
+  caller: string,
+  resolution: Extract<CallerBrowserResolution, { kind: 'ambiguous' | 'unresolved' }>,
+  respondError: (code: number, message: string) => void,
+): void {
+  if (resolution.kind === 'ambiguous') {
+    respondError(-32000, `${method}: surface ${caller} has more than one browser pane in its workspace — pass --surface <id> to pick one`);
+  } else {
+    respondError(-32000, `${method}: no workspace found for surface ${caller} — is it a live terminal surface?`);
+  }
+}
+
+/** `browser.get_engine`. See `handleBrowserEngineV2` for the params contract. */
+async function handleGetEngine(
+  params: any,
+  respond: (result: any) => void,
+  respondError: (code: number, message: string) => void,
+): Promise<void> {
+  let surfaceId: string | undefined = params?.surfaceId;
+  if (!surfaceId) {
+    const caller: string | undefined = params?.caller;
+    if (!caller) {
+      respondError(-32602, 'browser.get_engine: surface required — pass --surface <id>, or run from inside a pane so $WMUX_SURFACE_ID is set');
+      return;
+    }
+    const resolution = await resolveCallerBrowserSurface(caller);
+    if (resolution.kind === 'found') {
+      surfaceId = resolution.surfaceId;
+    } else if (resolution.kind === 'none') {
+      // Nothing bound yet: the next REAL browser verb from this caller would
+      // create a 'web' pane by default, so that is the honest answer — no
+      // need to create anything just to answer a query.
+      respond({ engine: 'web' });
+      return;
+    } else {
+      respondResolutionFailure('browser.get_engine', caller, resolution, respondError);
+      return;
+    }
+  }
+  if (!surfaceId) { respondError(-32000, 'browser.get_engine: could not resolve a browser surface'); return; }
+  respond({ engine: await readBrowserEngine(surfaceId) });
+}
+
+/** `browser.set_engine`. See `handleBrowserEngineV2` for the params contract. */
+async function handleSetEngine(
+  params: any,
+  respond: (result: any) => void,
+  respondError: (code: number, message: string) => void,
+): Promise<void> {
+  const engine: BrowserEngine | undefined = params?.engine;
+  if (engine !== 'web' && engine !== 'agent') {
+    respondError(-32602, `browser.set_engine: engine must be "web" or "agent" (got ${JSON.stringify(params?.engine)})`);
+    return;
+  }
+
+  let surfaceId: string | undefined = params?.surfaceId;
+  if (!surfaceId) {
+    const caller: string | undefined = params?.caller;
+    if (!caller) {
+      respondError(-32602, 'browser.set_engine: surface required — pass --surface <id>, or run from inside a pane so $WMUX_SURFACE_ID is set');
+      return;
+    }
+    const resolution = await resolveCallerBrowserSurface(caller);
+    if (resolution.kind === 'found') {
+      surfaceId = resolution.surfaceId;
+    } else if (resolution.kind === 'none') {
+      const created = await resolution.win.webContents.executeJavaScript(
+        `window.__wmux_splitPane?.({ direction: 'horizontal', type: 'browser', workspaceId: ${JSON.stringify(resolution.workspaceId)} }) ?? null`,
+      );
+      if (!created?.surfaceId) {
+        respondError(-32000, `browser.set_engine: could not create a browser pane for surface ${caller}`);
+        return;
+      }
+      surfaceId = created.surfaceId;
+    } else {
+      respondResolutionFailure('browser.set_engine', caller, resolution, respondError);
+      return;
+    }
+  }
+  if (!surfaceId) { respondError(-32000, 'browser.set_engine: could not resolve a browser surface'); return; }
+
+  const ok = await writeBrowserEngine(surfaceId, engine);
+  if (!ok) {
+    respondError(-32000, `browser.set_engine: surface ${surfaceId} does not exist or is not a browser surface`);
+    return;
+  }
+  respond({ engine });
+}
+
+/**
+ * `browser.get_engine` / `browser.set_engine`.
+ *
+ * Params carry either an explicit `surfaceId` (a known browser surface —
+ * always used as-is) or a `caller` (a terminal surface, the shape every other
+ * `browser.*` verb already accepts, forwarded here by `cmdBrowser`'s existing
+ * `--surface`/`$WMUX_SURFACE_ID` handling with no CLI-side special-casing).
+ * Neither present is the one case Part 2 asks for directly: -32602, since
+ * there is nothing to resolve.
+ */
+function handleBrowserEngineV2(
+  method: string,
+  params: any,
+  respond: (result: any) => void,
+  respondError: (code: number, message: string) => void,
+): void {
+  const task = method === 'browser.set_engine'
+    ? handleSetEngine(params, respond, respondError)
+    : handleGetEngine(params, respond, respondError);
+  task.catch((err: any) => respondError(-32000, err?.message ?? String(err)));
+}
+
 // Route the V2 methods that live in their own modules: browser.* (per-caller
 // isolated routing, issue #62) and the uniform renderer-bridge methods. Returns
 // true when the method was handled here so the main switch can be skipped.
@@ -44,6 +252,13 @@ function routeSpecialV2(
   respond: (result: any) => void,
   respondError: (code: number, message: string) => void,
 ): boolean {
+  // get_engine/set_engine must be caught BEFORE the generic browser.*
+  // delegation just below, or they fall into handleBrowserV2's verb switch
+  // and are rejected as `Unknown: browser.get_engine` (-32601).
+  if (request.method === 'browser.get_engine' || request.method === 'browser.set_engine') {
+    handleBrowserEngineV2(request.method, request.params, respond, respondError);
+    return true;
+  }
   if (request.method.startsWith('browser.')) {
     handleBrowserV2(request.method, request.params, respond, respondError);
     return true;
@@ -603,6 +818,23 @@ app.whenReady().then(() => {
   // PTYs about to be created, and the reap itself is async and unawaited so
   // startup never blocks on it.
   reapOrphanedPtys();
+
+  // The agent-browser half of the same problem. A crashed wmux leaves its
+  // sessions' Chromes resident for exactly the reason its PTY subtrees survive
+  // above, and the in-memory SessionRegistry starts empty, so those survivors
+  // are invisible to this process — ground truth is `agent-browser session
+  // list`. Sessions are ephemeral by design, so every `wmux-` session with no
+  // live surface is garbage; nothing without that prefix is ever touched.
+  //
+  // Unawaited, and it exits immediately when agent-browser is not installed, so
+  // a machine that has never used the feature pays one function call. Ordered
+  // before the restore below for the same tidiness reason the PTY reap is —
+  // and `reconcileOrphanSessions` re-checks the registry immediately before
+  // each close, so a pane restored into agent mode while the list is in flight
+  // cannot be swept up by it.
+  reconcileOrphanSessions(agentBrowserTeardownDeps).catch((err: Error) => {
+    console.warn('[wmux] agent-browser session reconcile failed:', err?.message);
+  });
 
   // Clear stale session data on version change (clean start for upgrades/fresh installs)
   handleVersionChange(app.getVersion());
@@ -1333,16 +1565,53 @@ app.on('browser-window-created', (_event, win) => {
   });
 });
 
-app.on('will-quit', () => {
+/**
+ * Whether the agent-browser teardown pass has already been started.
+ *
+ * `will-quit` is SYNCHRONOUS, and closing an agent-browser session is not: it
+ * is a child process per session plus a dashboard stop. The only way to do it
+ * at quit is to `preventDefault()` the first pass, run the async teardown, and
+ * call `app.quit()` again — so this flag is what keeps the second pass from
+ * preventing the quit it was asked to complete. Everything else in the handler
+ * is idempotent by inspection (`killAll` on an empty map; every `stop()` here
+ * nulls what it closed), so the second pass repeating them is a no-op.
+ */
+let agentBrowserTornDown = false;
+
+app.on('will-quit', (event) => {
   logDiagnostic('will-quit', { ptys: ptyManager.count(), guard: isPtyCrashGuardInstalled() });
   // Kill all PTYs before anything else tears down. Without this, node-pty's
   // libuv async handles (batons) are still pending when the process exits,
   // triggering the "Assertion failed: remove_pty_baton" MSVC runtime error.
+  //
+  // Deliberately still FIRST, ahead of the deferral below: #150 is about these
+  // callbacks firing while the environment is healthy, so nothing may push
+  // them later than they happen today.
   ptyManager.killAll();
   pipeServer.stop();
   cdpProxy.stop();
   portScanner.stop();
   sshDetector.stop();
+
+  // Sessions are ephemeral (agent-browser-session.ts): quit is the moment every
+  // one of them stops being legitimate. Not closing them here leaks a Chrome
+  // per agent pane — on Windows a dead parent does not take its descendants
+  // with it, which is the whole of issue #139.
+  if (agentBrowserTornDown || !agentBrowserNeedsTeardown()) return;
+  agentBrowserTornDown = true;
+  event.preventDefault();
+
+  // Bounded twice over. `teardownAgentBrowser` caps itself, and this timer caps
+  // IT — because the one outcome worse than leaking a browser is a wmux the
+  // user cannot quit. `app.exit()` rather than `app.quit()` on that path: quit
+  // would re-enter this handler and there is nothing left for it to do, since
+  // every step above has already run.
+  const forceQuit = setTimeout(() => app.exit(0), QUIT_TEARDOWN_BUDGET_MS + 2_000);
+  const finish = (): void => {
+    clearTimeout(forceQuit);
+    app.quit();
+  };
+  teardownAgentBrowser(agentBrowserTeardownDeps).then(finish, finish);
 });
 
 app.on('window-all-closed', () => {

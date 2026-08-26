@@ -323,6 +323,47 @@ contextBridge.exposeInMainWorld('wmux', {
       ipcRenderer.send(IPC_CHANNELS.CDP_ATTACH, webContentsId, surfaceId, workspaceId),
     detach: (webContentsId?: number) => ipcRenderer.send(IPC_CHANNELS.CDP_DETACH, webContentsId),
   },
+  // Which engine backs a browser surface, and the setup flow for the one that
+  // needs an external binary. Separate from `cdp` above: those verbs act on a
+  // surface's engine, these change it.
+  agentBrowser: {
+    /** `{ installed, dashboardAvailable }` — asked whenever a pane enters agent mode. */
+    status: (): Promise<{ installed: boolean; dashboardAvailable: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_STATUS),
+    /**
+     * Start this surface's session. `currentUrl` carries the page the <webview>
+     * was showing so the flip is not a navigation back to nothing.
+     * `{ installed: false }` is a normal answer, not a failure — it is the
+     * renderer's cue to show the setup card.
+     */
+    enable: (
+      surfaceId: string,
+      currentUrl?: string,
+    ): Promise<{ installed: boolean; dashboardUrl?: string; sessionName?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_ENABLE, surfaceId, currentUrl),
+    /** Close the session, returning where it was so `web` can pick up there. Safe to call twice. */
+    disable: (surfaceId: string): Promise<{ url?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_DISABLE, surfaceId),
+    /**
+     * Where the session's Chrome actually is. `{}` when it cannot be read.
+     *
+     * The pane polls this in agent mode because the agent navigates the real
+     * browser on its own, so the last URL the PANE asked for stops being true
+     * the moment it does — and the address bar would go on showing it.
+     */
+    currentUrl: (surfaceId: string): Promise<{ url?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_CURRENT_URL, surfaceId),
+    /**
+     * Navigate an already-live session. Not `enable`: this neither re-acquires
+     * the dashboard nor re-binds the stream, both of which `enable` does and
+     * neither of which navigation needs.
+     */
+    open: (surfaceId: string, url: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_OPEN, surfaceId, url),
+    /** Open a terminal pane running the install, so its output is readable. */
+    install: (): Promise<{ started: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AGENT_BROWSER_INSTALL),
+  },
   window: {
     create: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CREATE),
     close: (id: string) => ipcRenderer.send(IPC_CHANNELS.WINDOW_CLOSE, id),
