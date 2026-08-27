@@ -40,6 +40,10 @@ import type {
   SurfaceDragPreviewTarget,
 } from './components/SplitPane/drag-preview-types';
 import { buildSurfaceDragPreview } from './components/SplitPane/surface-drag-preview';
+import { surfaceTerminalRegistry } from './hooks/useTerminal';
+import { forgetSurface as forgetPromptLog, recordAgentPrompt } from './utils/prompt-log';
+import { SURFACE_CLOSED_EVENT } from './store/pty-teardown';
+import { followOutputFor, togglePinnedPromptFor, togglePromptOutlineFor } from './store/prompt-actions';
 import { useT } from './i18n';
 import type { TranslationKey } from './i18n';
 
@@ -353,6 +357,31 @@ function handleSurfaceMetadata(cmd: any, ws: WorkspaceInfo, deps: MetaDeps): voi
       applyShellState(cmd, ws, deps);
       break;
   }
+}
+
+/**
+ * Claude Code UserPromptSubmit → the pane's prompt log (issue #207).
+ *
+ * Needs the surface's live terminal, because a prompt boundary is only useful
+ * as a POSITION in a buffer: the marker has to be registered against the
+ * emulator, now, while the cursor is still where the submission left it.
+ *
+ * Silently does nothing without one. A hook can arrive for a surface this
+ * window does not own — `handleHookEvent` broadcasts to every window, since a
+ * surface may live in a second one (issue #143) — and for a pane whose terminal
+ * is mid-remount. Neither is an error; the window that owns the surface handles
+ * it, and a prompt lost to a remount is one line in an outline.
+ */
+function recordPromptSubmission(event: any): void {
+  const surfaceId = typeof event.surfaceId === 'string' ? event.surfaceId : '';
+  const prompt = typeof event.prompt === 'string' ? event.prompt : '';
+  if (!surfaceId || !prompt) return;
+  const terminal = surfaceTerminalRegistry.get(surfaceId);
+  if (!terminal) return;
+  // `at` is stamped at hook PROCESS START, not on arrival — hook processes race
+  // each other, and the outline is ordered by this.
+  const at = typeof event.at === 'number' ? event.at : Date.now();
+  recordAgentPrompt(terminal, surfaceId, prompt, at);
 }
 
 /** Claude Code Notification (needs input) / Stop (turn finished) hook events. */
@@ -684,6 +713,28 @@ export default function App() {
     return unsub;
   }, []);
 
+  // Forget a closed surface's prompt log (issue #207).
+  //
+  // Bound to the destructive-close chokepoint in pty-teardown.ts, not to React
+  // unmount: a split-tree restructure unmounts and remounts a pane that is still
+  // very much open, and dropping its prompts there would empty the outline
+  // whenever the user closed an ADJACENT pane.
+  //
+  // Without this the log outlived the pane for the life of the window: `wmux
+  // prompts` reported closed panes as live ones, and the user's prompt text
+  // stayed queryable by any other pane's agent long after they closed the tab it
+  // belonged to.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const surfaceId = (e as CustomEvent).detail?.surfaceId;
+      if (typeof surfaceId !== 'string' || !surfaceId) return;
+      forgetPromptLog(surfaceId);
+      useStore.getState().clearPromptsForSurface(surfaceId);
+    };
+    document.addEventListener(SURFACE_CLOSED_EVENT, handler);
+    return () => document.removeEventListener(SURFACE_CLOSED_EVENT, handler);
+  }, []);
+
   // Listen for Claude Code hook events — tie to active workspace
   // Also auto-create diff surface when Edit/Write tools fire
   useEffect(() => {
@@ -694,6 +745,17 @@ export default function App() {
       if (event?.event === 'Notification' || event?.event === 'Stop') {
         handleAgentLifecycleEvent(event, addNotification, t);
         if (event.event === 'Stop') markSessionIdleOnStop(event.surfaceId, setHookActivity);
+        return;
+      }
+      // The user's own prompt, straight from Claude Code's UserPromptSubmit
+      // hook (issue #207). This is the authoritative boundary source for an
+      // agent pane and the only one that knows the TEXT — an agent TUI repaints
+      // over its own input box, so nothing that reads the screen afterwards can
+      // recover it. Handled here, before the `tool` guard below, because it has
+      // no tool and would otherwise be dropped like every other body-carrying
+      // event.
+      if (event?.event === 'UserPromptSubmit') {
+        recordPromptSubmission(event);
         return;
       }
       if (!event?.tool) return;
@@ -871,6 +933,30 @@ export default function App() {
     }
   }, [activeWorkspace?.id, activeWorkspace?.splitTree]);
 
+  /**
+   * Tell every `prompts` PANE which terminal it is listing (issue #207 follow-up).
+   *
+   * A prompts pane is not attached to the terminal it describes — it lives
+   * somewhere else in the split tree — so the focused terminal has to be pushed
+   * to it. Computed here because this is where focus lives; `focusedPaneId` is
+   * component state, not store state.
+   *
+   * The `if` is the whole rule. Focus landing on ANYTHING that is not a terminal
+   * leaves the last value standing, so clicking into the prompts pane itself —
+   * to filter it, to scroll it, to click a row — does not blank the list the
+   * user just reached for. `setPromptSourceSurface` no-ops on an unchanged
+   * value, which matters because this runs on every split-tree edit.
+   */
+  useEffect(() => {
+    const leaf = activeWorkspace && focusedPaneId
+      ? findLeaf(activeWorkspace.splitTree, focusedPaneId)
+      : undefined;
+    const surface = leaf?.surfaces[leaf.activeSurfaceIndex];
+    if (surface?.type === 'terminal') {
+      useStore.getState().setPromptSourceSurface(surface.id);
+    }
+  }, [activeWorkspace?.splitTree, focusedPaneId]);
+
   const handleRatioChange = useCallback(
     (leftPaneId: PaneId, rightPaneId: PaneId, ratio: number) => {
       if (!activeWorkspace) return;
@@ -961,13 +1047,24 @@ export default function App() {
   // route that still works when the shortcut itself is what the user cannot
   // remember. Listing it and not running it would be worse than not listing it.
   const handlePaletteAction = useCallback((action: string) => {
+    const ws = workspaces.find((w) => w.id === activeWorkspaceId);
+    const leaf = ws && focusedPaneId ? findLeaf(ws.splitTree, focusedPaneId) : undefined;
+    const surface = leaf?.surfaces[leaf.activeSurfaceIndex];
+    const terminalSurfaceId = surface?.type === 'terminal' ? surface.id : null;
+
     if (action === 'resetTerminal') {
-      const ws = workspaces.find((w) => w.id === activeWorkspaceId);
-      const leaf = ws && focusedPaneId ? findLeaf(ws.splitTree, focusedPaneId) : undefined;
-      const surface = leaf?.surfaces[leaf.activeSurfaceIndex];
-      if (surface?.type === 'terminal') {
-        document.dispatchEvent(new CustomEvent('wmux:reset-terminal', { detail: { surfaceId: surface.id } }));
+      if (terminalSurfaceId) {
+        document.dispatchEvent(new CustomEvent('wmux:reset-terminal', { detail: { surfaceId: terminalSurfaceId } }));
       }
+    } else if (action === 'togglePromptOutline') {
+      togglePromptOutlineFor(
+        terminalSurfaceId,
+        activeWorkspaceId && focusedPaneId ? { workspaceId: activeWorkspaceId, paneId: focusedPaneId } : null,
+      );
+    } else if (action === 'togglePinnedPrompt') {
+      togglePinnedPromptFor(terminalSurfaceId);
+    } else if (action === 'followOutput') {
+      followOutputFor(terminalSurfaceId);
     } else {
       console.log(`[wmux] Command palette action: ${action}`);
     }

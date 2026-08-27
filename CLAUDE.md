@@ -4,7 +4,7 @@ Electron-based Windows terminal multiplexer for AI agents. TypeScript, React 19,
 
 **Owner**: amirlehmam (GitHub) — speaks French, prefers fast pragmatic solutions, tests live.
 **Repo**: github.com/amirlehmam/wmux | **Site**: wmux.org (Netlify, static from `site/`)
-**Version**: 2.0.0
+**Version**: 2.5.0
 
 ---
 
@@ -152,7 +152,7 @@ docs/             Planning docs
 
 **Components** (in `components/`):
 - `SplitPane/` — PaneWrapper, SplitContainer, SplitDivider, SurfaceTabBar
-- `Terminal/` — TerminalPane, FindBar, CopyMode, NotificationRing
+- `Terminal/` — TerminalPane, FindBar, CopyMode, NotificationRing, PinnedPrompt, PromptOutline, NewOutputPill (the three prompt-log OVERLAYS, #207 — all `position: absolute` over the xterm container, never flow siblings: a flow sibling is pushed out of the container's `height:100%` box WITHOUT firing the ResizeObserver, so the PTY keeps its old row count and the bottom rows hide underneath, which is issue #82). Also `PromptsPane` — the outline as a `prompts` SURFACE rather than an overlay, and the one file here the #82 warning does NOT apply to, because it owns its whole box instead of floating over somebody else's. It is the same prompt log seen from elsewhere in the split tree, so unlike the overlay it has to be TOLD which terminal it lists: `promptSourceSurface` (the last terminal to hold focus, written by App.tsx) unless a `promptPaneLocks` entry pins it. Focus landing on a non-terminal deliberately does not update that, or clicking into the panel would blank the list the user just clicked on
 - `Browser/` — BrowserPane, AddressBar, AgentBrowserSetup (the `not-installed` vs `no-dashboard` cards — two genuinely different situations, never one card: the second means the agent browser works fine and only its optional viewer is missing)
 - `Sidebar/` — Sidebar, WorkspaceRow, SessionMenu, SidebarResizeHandle
 - `Titlebar/` — Titlebar, NotificationBell, NotificationPanel
@@ -162,8 +162,8 @@ docs/             Planning docs
 - `Tutorial/` — Tutorial
 
 **Hooks** (in `hooks/`):
-- `useTerminal.ts` — xterm.js lifecycle, PTY connection, OSC notifications, WebGL renderer
-- `useKeyboardShortcuts.ts` — 51+ shortcut actions, safe interception
+- `useTerminal.ts` — xterm.js lifecycle, PTY connection, OSC notifications, WebGL renderer, OSC 133 prompt marks (#207)
+- `useKeyboardShortcuts.ts` — 54+ shortcut actions, safe interception
 
 **Pipe Bridge** (`pipe-bridge.ts`):
 - Exposes Zustand store operations as `window.__wmux_*` globals
@@ -179,6 +179,8 @@ docs/             Planning docs
 - `settings-slice.ts` — Shortcuts, sidebar prefs, theme
 - `notification-slice.ts` — Notification lifecycle (max 200)
 - `agent-slice.ts` — Agent metadata tracking
+- `prompt-slice.ts` — Per-surface prompt log (#207). Bounded twice: 200 prompts per surface, 64 surfaces. **Only the facts** — a marker is a live emulator object and lives in `utils/prompt-marks.ts` instead. `line: null` means "not jumpable"; a view must never read it as line 0
+- `prompt-actions.ts` — The three prompt commands as functions of a surface id, because there are two callers (the shortcut table and the command palette) and they were about to disagree. The palette hands every action it does not recognise to a `console.log`, so an action wired only into the keyboard table appears in the palette, is selectable, and silently does nothing
 - `split-utils.ts` — Immutable split tree helpers
 
 ### Preload API (`window.wmux`)
@@ -246,6 +248,103 @@ The `surfaceId` is passed to `pty.create()` so PTY ID = Surface ID (enables reli
 Pane layouts use an immutable binary tree (`SplitNode`). Each leaf = one pane with N surfaces (tabs).
 Mutations go through `splitNode()`, `removeLeaf()`, `findLeaf()`, `getAllPaneIds()` in `split-utils.ts`.
 
+### Prompt Boundaries — One Producer, Four Views (issue #207)
+
+Highlighting a prompt, pinning it, anchoring the view at the start of an answer and
+listing prompts as jump marks are four consumers of ONE fact: where a user prompt
+starts. So there is one producer (`utils/prompt-log.ts`) and four independent,
+individually-toggleable views — not four detectors.
+
+Two sources feed it, **ranked and never merged**, the shape `ssh-detect.ts` uses:
+
+| Source | Carries | Where |
+|--------|---------|-------|
+| `agent` | The prompt TEXT, verbatim | Claude Code's `UserPromptSubmit` hook → `wmux-hook.js` → pipe → `App.tsx` |
+| `shell` | A boundary, no text | OSC 133 (FinalTerm) from the shell integration → the xterm parser |
+
+There is deliberately **no heuristic third source**. wmux stopped guessing agent state
+from screen scraping in 0.39.0 (#128) and this does not reintroduce it: with neither
+source present the log stays empty and every view is inert. That is the honest outcome —
+a mis-detected boundary pins the wrong text and anchors the view to the wrong line, and
+the user has no way to tell it happened.
+
+Four things about this are easy to get wrong and expensive to rediscover:
+
+- **`layer: 'bottom'` does NOT put a decoration under the glyphs, and cannot.** xterm
+  gives its decoration container `z-index: 6` while the renderer's canvas is `z-index: 2`,
+  so a decoration's DOM element always paints OVER the text; `layer` orders decorations
+  against each other and nothing else. 2.4.0 tinted the prompt rows with a CSS
+  `::before` on that element, which therefore had to sit at `opacity: .12` or it washed
+  out the text it was pointing at — and at 12% over a terminal background every hue
+  collapses to the same near-neutral grey. The colour picker in Settings → Prompts
+  worked perfectly and looked completely broken; users reported it as "the rail is
+  always grey whatever colour I pick". The tint is now the decoration's
+  `backgroundColor`, which both renderers composite into the CELL background before
+  drawing glyphs — the layer the CSS was only pretending to be on. Two consequences:
+  the alpha must be **pre-blended in JS** against `terminal.options.theme.background`
+  (xterm IGNORES the alpha channel there — `#ff2d5540` and `#ff2d55` paint identically),
+  and the rail stays in CSS as the one element carrying the user's colour at full
+  saturation. If you are ever tempted to style a decoration's background in CSS again,
+  this is why it does not work.
+- **The prompt text is read out of the BUFFER for a shell**, never sent over the pipe.
+  Main already refuses to broadcast `report_command` to a renderer because a command
+  line is where a credential reliably shows up (`index.ts`, the `report_command`
+  hard-stop). The renderer is already displaying those bytes, so lifting them from the
+  buffer adds no new crossing. Only the agent source sends text, and only because an
+  agent TUI repaints over its own input box — nothing that reads the screen afterwards
+  can recover it.
+- **Markers do not survive a split-tree restructure.** A remount replays the buffer as
+  serialized TEXT (`snapshotSurfaceBuffer`), which carries no markers. Those prompts stay
+  in the outline with `line: null` and a disabled jump, rather than scrolling the user
+  somewhere arbitrary.
+- **The anchor's pending-line count is NOT in the store.** It changes on every PTY chunk;
+  a store write there re-renders every subscriber at PTY speed, which is the shape of
+  #141. It lives in a module map like `surfaceMouseModes`, and the pill subscribes to a
+  throttled DOM event.
+
+Defaults: `highlight` and `anchor` ON, `pin` OFF (it costs vertical space), `outline`
+available but closed, and `anchorScope: 'agent'` — anchoring applies to AGENT answers
+only. That last one is the load-bearing default: a shell following its own output is
+not the problem #207 describes, it is what every terminal has done for forty years, and
+silently holding `npm run build` back from streaming reads as a freeze rather than as a
+feature. `'all'` opts shell command lines in.
+
+Governed by `promptDefaultRev` — changing any of them later needs a rev bump plus a
+`PROMPT_PROMOTIONS` entry, or it reaches nobody (prefs persist as whole blocks). Adding
+a NEW field is free (`{...DEFAULTS, ...stored}` fills it in); only changing an existing
+default needs the rev.
+
+**The outline has two presentations, and `outlineMode` picks which one the command
+opens.** `'overlay'` is the docked panel from 2.4.0 — it floats over the terminal it
+lists, which is right for a glance and wrong for anything you keep open, because it
+covers the output it is describing. `'pane'` opens a `prompts` SURFACE instead, which
+lives in the split tree and so splits, resizes and persists like any other pane.
+`'overlay'` stays the default: a preference that silently changes what an existing key
+does is a bug report. Both are always reachable — the tab bar's `+` menu and
+`wmux new-surface --type prompts` make a pane regardless of the setting, and
+`outlineSide` is greyed out under `'pane'` because the split tree already decides that.
+Neither is a second implementation: both read the same per-surface prompt log and jump
+through the same marks.
+
+**Anchoring is armed before it is engaged, and the distinction is the whole design.**
+A prompt is submitted at the BOTTOM of the buffer, so its line is `>= ydisp`.
+`scrollToLine` on such a line takes xterm's "already at the bottom" branch: it sets
+`isUserScrolling = false`, clamps, and does not move. The next write then scrolls, and
+`BufferService` does `if (!isUserScrolling) ydisp = ybase` before firing `onScroll` — so
+a naive listener sees `viewportY === baseY`, reads it as "the user caught up", and
+releases. Every time, on the first line of output. The first implementation did exactly
+that and the feature held nothing; the tests missed it because the fake terminal let
+`scrollToLine` move the viewport anywhere. So: **armed** = recorded but the prompt is
+still on the last screen and nothing is hidden; **engaged** = the buffer has grown past
+it and the viewport is genuinely held. The release-on-bottom rule applies only while
+engaged. `tests/unit/prompt-anchor.test.ts` models xterm's real clamp and its
+fill-the-screen-then-grow-baseY behaviour, and pins this.
+
+The anchor holds a **resolver**, not a line number: an absolute buffer line stops meaning
+the same row once the scrollback fills and lines are trimmed off the top. The prompt's
+xterm marker tracks that; a snapshot does not. A resolver answering null (the marker
+died) is the anchor's cue to let go rather than hold a row that no longer exists.
+
 ---
 
 ## Release Process (CRITICAL)
@@ -286,7 +385,9 @@ npx asar pack .asar-staging build-out/app.asar --unpack-dir "node_modules/node-p
 # 5. Verify native modules are unpacked
 ls build-out/app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/
 # Must contain: conpty.node, conpty_console_list.node, pty.node
-# Sanity: ASAR should be ~24M (natives unpacked). 80M+ means natives weren't
+# Sanity: compare against the PREVIOUS release's app.asar, not a fixed number —
+# it was ~24M at 0.7.x and ~34M at 2.4.0, so a stale constant here reads as a
+# packaging failure on a healthy build. What actually matters: natives unpacked
 # moved out; 180M+ means staging got polluted (see step 3 warning).
 
 # 5b. Verify the PRs/fixes you intended to ship are actually inside the ASAR.
@@ -389,7 +490,7 @@ rm -rf .asar-staging build-out /tmp/asar-verify ../wmux-release-staging
 - [ ] `npx vite build` succeeds
 - [ ] Compiled code verified (grep for key changes in dist/)
 - [ ] ASAR packed with `--unpack-dir node_modules/node-pty/prebuilds` (NOT `--unpack` glob)
-- [ ] ASAR size is ~24M (natives unpacked). 80M+ ⇒ unpack didn't take. 180M+ ⇒ staging polluted.
+- [ ] ASAR size within ~10% of the previous release's app.asar (34M at 2.4.0; the old "~24M" constant is stale). A sudden 2x+ ⇒ unpack didn't take. 180M+ ⇒ staging polluted.
 - [ ] node-pty native modules present in `app.asar.unpacked/node_modules/node-pty/prebuilds/win32-x64/`
 - [ ] PR-specific markers grep-confirmed inside the packed ASAR (extracted to /tmp)
 - [ ] wmux-orchestrator plugin copied to release staging
@@ -424,6 +525,7 @@ The pipe server in `index.ts` handles V2 JSON-RPC methods. Most delegate to the 
 - `pane.split`, `pane.close`, `pane.focus`, `pane.zoom`, `pane.list`
 - `surface.create`, `surface.close`, `surface.focus`, `surface.rename`, `surface.list`
 - `surface.send_text`, `surface.send_key`, `surface.read_text`, `surface.trigger_flash`
+- `surface.list_prompts` — the prompt log (#207). Diverges from `surface.read_text` on the multi-window lookup, deliberately: `read_text` can tell "this window does not own that terminal" from "the screen is blank" and so takes the first window that answers without an error, but a prompt log cannot — an unowned surface and a surface with nothing recorded both answer `[]`. So the targeted form takes the first NON-EMPTY answer, and the untargeted form MERGES across windows rather than reading the first reply, since "every tracked surface" is a fact about the app and each window keeps its own store
 - `markdown.set_content`, `markdown.load_file`, `markdown.get_content`
 - `notification.list`, `notification.clear`
 - `sidebar.set_status`, `sidebar.set_progress`, `sidebar.log`, `sidebar.get_state`
@@ -491,15 +593,33 @@ wmux markdown <file> | markdown set <id> --content <text> [--title T] | --file <
 wmux markdown get <id>                                 # read a surface's buffer back out
 
 # Surfaces (tabs within a pane)
-wmux new-surface [--type terminal|browser|markdown]
+wmux new-surface [--type terminal|browser|markdown|prompts]
+                                       # `prompts` is the prompt outline as a PANE
+                                       # (#207): it lists whichever terminal last had
+                                       # focus, so it needs no --surface, and its 🔓
+                                       # button pins it to one when following focus is
+                                       # the wrong behaviour (two terminals, watching
+                                       # one while typing in the other)
 wmux close-surface | focus-surface | rename-surface | list-surfaces
 
 # Panes
 wmux split [--down] [--type T] | close-pane | focus-pane | zoom-pane | list-panes | tree
+                                       # --type takes the same set as new-surface, so
+                                       # `wmux split --type prompts` puts the outline
+                                       # beside the terminal in one command
 
 # Terminal I/O
 wmux send <text> | send-key <key> [--ctrl] [--shift] [--alt]
 wmux read-screen [--lines N] [--surface <id>] | trigger-flash
+wmux prompts [--surface <id>] [--limit N] [--json]     # the prompt log (issue #207)
+                                       # What this pane has been asked, oldest first:
+                                       # "#<seq>  <hh:mm>  <summary>". Surface defaults
+                                       # to $WMUX_SURFACE_ID, so an agent inside a pane
+                                       # needs no id; with no --surface at all it reports
+                                       # every tracked pane. --json adds the full text,
+                                       # the source (agent|shell) and the buffer line —
+                                       # where `null` means the prompt has scrolled out
+                                       # of history and is no longer jumpable.
 
 # Browser — the same verbs on either engine, so agents need no re-education
 wmux browser open <url> | snapshot | click eN | type eN <text>
@@ -592,9 +712,36 @@ Scripts in `src/shell-integration/` (deployed to `resources/shell-integration/`)
 
 | Script | Reports |
 |--------|---------|
-| `wmux-powershell-integration.ps1` | cwd, git branch/dirty, shell state, PR polling (45s) |
-| `wmux-bash-integration.sh` | cwd, git branch/dirty, shell state, ports |
-| `wmux-cmd-integration.cmd` | Basic OSC 9 escape sequences |
+| `wmux-powershell-integration.ps1` | cwd, git branch/dirty, shell state, PR polling (45s), OSC 133 A/B/C/D |
+| `wmux-bash-integration.sh` | cwd, git branch/dirty, shell state, ports, OSC 133 A/B/C/D (bash + zsh) |
+| `wmux-cmd-integration.cmd` | Basic OSC 9 escape sequences, OSC 133 A/B (no C/D — cmd has no preexec seam, so they are not representable and are deliberately not faked) |
+
+`resources/shell-integration/` is a checked-in **byte-identical mirror**, enforced by
+`tests/unit/resources-sync.test.ts` (#168/#169) — editing a script without copying it
+there fails `npm test` AND ships the old file.
+
+**OSC 133 (#207)** carries the prompt boundaries the prompt log needs in-band, which a
+pipe message arriving milliseconds later cannot: the consumer is the xterm parser, and it
+needs the boundary at an exact byte offset in the stream. Two traps, both load-bearing:
+
+- **bash needs a DOUBLED backslash for the ST terminator inside `\[ \]`.** bash decodes
+  the contents of the ignore region, so ST's trailing `\` pairs with the `\` of the
+  closing `\]`: the end marker is destroyed, a stray `]` leaks into the visible prompt,
+  readline mis-measures the prompt width and long command lines wrap wrong. Verify with
+  `printf '%s' "${PS1@P}" | od -c`, never by reading. zsh's `%{ %}` expansion is
+  `%`-based and passes backslashes through, so there the plain form is the correct one.
+- **PowerShell: `$?` decides, `$LASTEXITCODE` only refines.** They answer different
+  questions — `$LASTEXITCODE` is the last *native* process's code, says nothing about a
+  failed cmdlet, and is sticky. Using it alone reports every failed cmdlet as a success.
+  Both must be captured as the first two statements of `prompt`; almost anything clobbers
+  them, which is how the `interrupted` shell state sat dead for years (`Report-GitBranch`
+  ran `git` before the check read `$LASTEXITCODE`).
+
+`B`/`C` come from `PSConsoleHostReadLine`, not the PSReadLine Enter handler: that handler
+runs *before* `AcceptLine` echoes the newline, so a `C` there lands on the input row and
+every consumer is one row out. It also keeps the marks out of the prompt string, so
+PSReadLine never has to width-count escapes — the PowerShell analogue of the `\[ \]`
+problem, sidestepped rather than solved.
 
 Env vars set by wmux in spawned shells: `WMUX=1`, `WMUX_SURFACE_ID`, `WMUX_PIPE`, `WMUX_CLI`,
 `WMUX_NODE` (+ `WMUX_NODE_ELECTRON` when it is wmux's own binary — issue #187).
