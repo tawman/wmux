@@ -38,8 +38,9 @@ import { applyHookToAgentState, hookEventName } from './agent-hook-bridge';
 import { startOrchestrationWatcher } from './orchestration-watcher';
 import { A2AStore } from './a2a-store';
 import { readMarkdownFile } from './markdown-file';
-import { grantMarkdownPath, clearMarkdownGrants } from './markdown-grants';
+import { grantFilePath, clearFileGrants } from './file-grants';
 import { directoryFromArgv } from './shell-context-menu';
+import { reportExplorerCwd } from './explorer-roots';
 import { ensurePowerShellShim } from './powershell-shim';
 import { loadSettings } from './settings-store';
 import fs from 'fs';
@@ -324,7 +325,7 @@ const a2aStore = new A2AStore();
 // *last* window, which is how most people quit wmux and must still persist
 // everything for the next launch.
 windowManager.onWindowClosed = (id, webContentsId) => {
-  clearMarkdownGrants(webContentsId);
+  clearFileGrants(webContentsId);
   if (isQuitting || windowManager.getCount() === 0) return;
   sessionWindows.forget(id);
   saveSession({ version: 1, windows: sessionWindows.toArray() });
@@ -1122,6 +1123,11 @@ app.whenReady().then(() => {
 
     if (cmd.command === 'report_pwd') {
       sshDetector.reportCwd(surfaceId, cmd.args[0] ?? '');
+      // Second consumer of the same report: the explorer panel's tree root
+      // resolves from the cwd a shell declares, the same one ssh-detect reads.
+      // One report, two readers — not two mechanisms that can disagree about
+      // where a pane is.
+      reportExplorerCwd(surfaceId, cmd.args[0] ?? '');
       return;
     }
 
@@ -1494,7 +1500,7 @@ app.whenReady().then(() => {
             // This method is token-gated, so the caller is an authenticated
             // client that deliberately opened this file — the same standard as
             // a native dialog, and enough to allow editing it back (F3).
-            grantMarkdownPath(win.webContents.id, filePath);
+            grantFilePath(win.webContents.id, filePath);
             await win.webContents.executeJavaScript(
               `window.__wmux_setMarkdownContent?.(${JSON.stringify(request.params?.surfaceId || '')}, ${JSON.stringify(read.content)}, ${JSON.stringify(path.basename(filePath))}, ${JSON.stringify(filePath)}, ${JSON.stringify(read.mtimeMs)})`
             );

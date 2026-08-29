@@ -19,7 +19,7 @@ export type SplitNode =
  * actually requires. Both drive the same per-surface prompt log, so neither is a
  * second implementation of anything.
  */
-export type SurfaceType = 'terminal' | 'browser' | 'markdown' | 'diff' | 'prompts';
+export type SurfaceType = 'terminal' | 'browser' | 'markdown' | 'diff' | 'code' | 'prompts';
 
 /**
  * Which engine backs a `browser` surface.
@@ -100,9 +100,170 @@ export interface SurfaceRef {
   markdownFileMtime?: number;
   /** Buffer differs from what is on disk (F3). Shown as a `•` on the tab and
    *  confirmed before closing. Persisted with the content, so an unsaved edit
-   *  survives a restart — and comes back still marked unsaved. */
+   *  survives a restart — and comes back still marked unsaved.
+   *
+   *  Read by the CODE surface too, despite the name. It is the one flag meaning
+   *  "this surface has unsaved edits", and three places already act on it: the
+   *  tab's `•`, the close confirmation, and the preview-tab recycler, which
+   *  refuses to reuse a dirty tab for the next file. A second `codeDirty` would
+   *  have had to be added to all three, and the one that got missed would have
+   *  been the recycler — silently discarding the user's edits on their next
+   *  click in the tree. */
   markdownDirty?: boolean;
+
+  // ─── Code viewer surface ───────────────────────────────────────────────────
+  // A read-only text view of a file the explorer opened. Deliberately its OWN
+  // type rather than a flag on `markdown`: a .rs file in a surface labelled
+  // markdown lies to `wmux markdown get`, to the tab icon, and to session
+  // restore. Read-only is structural — CodePane has no editor — not a flag
+  // every future feature has to remember to check.
+
+  /** Absolute path of the file. ALWAYS set: a code surface is never pathless,
+   *  which is the difference from `markdownFilePath` that lets the buffer go
+   *  unpersisted. */
+  codeFilePath?: string;
+  /** Basename, used as the tab label. */
+  codeFileName?: string;
+  /** Path relative to the surface's explorer root. Carried because a reload
+   *  goes back through `code.read-file`, which takes a relPath — rebuilding one
+   *  would mean re-deriving the root in the renderer, which is exactly what the
+   *  jail exists to prevent. */
+  codeRelPath?: string;
+  /**
+   * The TERMINAL surface whose explorer root this file was read under.
+   *
+   * Persisted, and the reason a restored code tab can refill itself: main
+   * addresses a code read by (surfaceId, relPath) where the surfaceId must be
+   * a live, owned terminal — the code surface's OWN id has no PTY and no
+   * reported cwd, so reading with it always answers `no_root`. Surface ids
+   * survive a restore verbatim (replaceAllWorkspaces takes the saved splitTree
+   * as-is), so the terminal this points at is the same one after a restart.
+   */
+  codeRootSurfaceId?: SurfaceId;
+  /**
+   * The file's text. In-store only — STRIPPED by dropCodeContent before any
+   * persistence, unlike markdownContent which is deliberately persisted.
+   *
+   * Two reasons, both concrete. dropEphemeralSurfaces promotes a leaf's only
+   * clean ephemeral surface rather than dropping it, so a code preview tab
+   * genuinely can reach session.json and a saved layout. And instantiateLayout
+   * spreads every surface field through, so a persisted buffer would be reborn
+   * as a stale ghost of a file in every workspace made from that layout — the
+   * same failure workspace-slice.ts:276 describes for `ephemeral`.
+   */
+  codeContent?: string;
+  /**
+   * An explorer preview tab: the next single-click replaces it in place rather
+   * than opening another tab. Cleared when the user promotes it (double-click,
+   * Ctrl+click, or an edit). Never persisted — see the session mappers.
+   */
+  ephemeral?: boolean;
 }
+
+// ─── File explorer ───────────────────────────────────────────────────────────
+// Directory ENUMERATION was the original capability here. MARKDOWN reads still
+// go through markdown.readFile, which is unjailed by deliberate existing
+// design; CODE reads go through code:read-file, which is jailed to the same
+// root this enumeration uses and has no extension whitelist at all — the two
+// are inverses of each other, and neither widens the other. Either way the
+// renderer supplies no filesystem path at any point — only a surfaceId and a
+// relative path, both of which main validates.
+
+/**
+ * Per-directory enumeration cap. Declared here rather than in explorer-fs.ts
+ * because the renderer's "showing the first N entries" banner has to state the
+ * same number, and a renderer may not import from src/main/.
+ */
+export const EXPLORER_MAX_ENTRIES = 2000;
+
+export interface ExplorerEntry {
+  name: string;
+  kind: 'dir' | 'file' | 'symlink';
+  size: number;
+  mtimeMs: number;
+  /**
+   * Whether the tree offers this entry as clickable. A cheap NAME-based hint,
+   * not a promise: the content sniff runs at open, so a viewable file can still
+   * come back `binary`. Directories and symlinks are never viewable.
+   */
+  viewable: boolean;
+}
+
+export interface ExplorerListOk {
+  /**
+   * Absolute, realpath'd Windows root main resolved for this surface.
+   *
+   * NOT display-only: this is the ONLY spelling of the root the renderer may
+   * build absolute paths from. The cwd a shell reports is not usable for that
+   * — Git Bash reports `/c/Users/...`, and a PowerShell cwd can be a junction,
+   * an 8.3 short name, or differently cased. Main normalizes and realpaths all
+   * of those on the way in, so enumeration works either way, but a path the
+   * renderer concatenates from the REPORTED cwd is a path `markdown.readFile`,
+   * `markdown.reveal`, `markdown.openInApp` and the clipboard all choke on.
+   */
+  root: string;
+  /** The listed directory relative to `root`, POSIX separators, '' for the root. */
+  relPath: string;
+  entries: ExplorerEntry[];
+  /** Directory exceeded MAX_ENTRIES; `entries` is a prefix. */
+  truncated: boolean;
+}
+
+export type ExplorerErrorCode =
+  | 'no_root'         // surface has reported no cwd yet
+  | 'remote'          // surface is inside ssh; its cwd is not a local path
+  | 'invalid_path'    // relPath failed the Windows path policy
+  | 'outside_root'    // escaped the jail
+  | 'not_found'
+  | 'not_a_directory'
+  | 'binary'          // deny-listed extension, or the content sniff rejected it
+  | 'executable'      // a shell action refused to launch a program or script
+  | 'too_large'       // exceeds MAX_CODE_BYTES
+  | 'denied'          // EACCES/EPERM
+  | 'read_failed'
+  // ─── Write-side codes ──────────────────────────────────────────────────────
+  | 'not_granted'     // never opened into a live pane in this window — see file-grants.ts
+  | 'conflict'        // changed on disk since it was read; the save was REFUSED, not merged
+  | 'write_failed';
+
+/** `error` stays English for main-process callers; `code` is what the renderer
+ *  maps to a translation key. Same split as MarkdownReadError (commit 82a779f). */
+export interface ExplorerListError { error: string; code: ExplorerErrorCode }
+
+export type ExplorerListResult = ExplorerListOk | ExplorerListError;
+
+/**
+ * One changed file, as the explorer's +N/-N column consumes it.
+ *
+ * Structurally the `ChangedFile` main/diff-provider.ts already produces — named
+ * separately here only because `shared/` may not import from `main/`. The two
+ * are pinned together by a test rather than by a comment, so a field added on
+ * one side cannot silently go missing on the other.
+ *
+ * `path` is POSIX-separated and relative to the root, matching both git's own
+ * output and what `listDir` puts on the wire. Every consumer keys on that one
+ * spelling; nothing downstream re-derives it with `path.sep`.
+ */
+export interface ExplorerDiffEntry {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed';
+  additions: number;
+  deletions: number;
+}
+
+export interface ExplorerDiffOk {
+  root: string;
+  files: ExplorerDiffEntry[];
+  /**
+   * Which baseline produced these numbers, so the panel can say so rather than
+   * leaving the user to guess whether `+55` means "since my last commit" or
+   * "since I opened wmux". They are genuinely different questions and the
+   * provider picks between them on its own.
+   */
+  baseline: 'git' | 'snapshot';
+}
+
+export type ExplorerDiffResult = ExplorerDiffOk | ExplorerListError;
 
 /**
  * A user-saved pane layout: geometry plus whatever each pane's surface was
@@ -186,6 +347,10 @@ export interface WorkspaceInfo {
   statusOverride?: 'running' | 'idle';
   browserUrl?: string;
   browserWidth?: number;
+  explorerOpen?: boolean;
+  explorerWidth?: number;
+  /** Expanded dirs by root path, POSIX separators. Capped at 8 roots, LRU. */
+  explorerExpanded?: Record<string, string[]>;
 }
 
 // Surface
@@ -320,6 +485,11 @@ export interface SavedSession {
     // Both written since 0.4x; declared here as of #145, which was caused by a
     // save path quietly dropping fields the type never mentioned.
     browserWidth?: number;
+    // Declared here for the same reason browserWidth is: #145 was a save path
+    // quietly dropping fields the type never mentioned.
+    explorerOpen?: boolean;
+    explorerWidth?: number;
+    explorerExpanded?: Record<string, string[]>;
     pinned?: boolean;
   }>;
   sidebarWidth: number;
@@ -537,6 +707,28 @@ export const IPC_CHANNELS = {
   MARKDOWN_SAVE_FILE: 'markdown:save-file',
   MARKDOWN_SAVE_AS: 'markdown:save-as',
   MARKDOWN_STAT_FILE: 'markdown:stat-file',
+  // File explorer: directory enumeration, jailed to the surface's root in main.
+  EXPLORER_LIST_DIR: 'explorer:list-dir',
+  // Per-file change counts for the tree's +N/-N column. Takes a surfaceId and
+  // NOT a cwd: `diff:get-files` above answers the same question from an
+  // absolute path the renderer supplies, which predates the explorer's jail and
+  // is exactly the pattern it exists to reject. Both call the same
+  // diff-provider, so the two views can never disagree about what changed.
+  EXPLORER_DIFF_STATS: 'explorer:diff-stats',
+  // Code viewer: read one text file, jailed to the same root list-dir uses.
+  CODE_READ_FILE: 'code:read-file',
+  // Write it back. Jail + grant set + mtime guard — see main/file-grants.ts for
+  // why a jail alone is not the whole answer.
+  CODE_WRITE_FILE: 'code:write-file',
+  // A markdown read that goes THROUGH the jail, and therefore mints a grant.
+  // Distinct from MARKDOWN_READ_FILE, which takes a renderer-supplied absolute
+  // path and mints nothing.
+  EXPLORER_READ_MARKDOWN: 'explorer:read-markdown',
+  // Shell actions on a listed entry, jailed the same way. Their own channels
+  // rather than the markdown ones, whose extension whitelist silently rejects
+  // every ordinary source file the tree now offers.
+  EXPLORER_REVEAL: 'explorer:reveal',
+  EXPLORER_OPEN_IN_APP: 'explorer:open-in-app',
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
