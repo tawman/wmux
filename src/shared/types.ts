@@ -266,6 +266,20 @@ export interface ExplorerDiffOk {
 export type ExplorerDiffResult = ExplorerDiffOk | ExplorerListError;
 
 /**
+ * How the panes of a NEW workspace are arranged (issue #212).
+ *
+ * Lives in shared rather than beside the builder in the renderer's split-utils
+ * because both sides of the wire need the same vocabulary: `~/.wmux/config.toml`
+ * is read and validated in main, and the tree is built in the renderer. Two
+ * copies of a string union is two lists that can disagree about what a layout
+ * name means, with the mismatch showing up as a silently ignored setting.
+ *
+ * `single` is not here on purpose — it is `panes = 1`, and user-config
+ * normalises that spelling away before the value ever reaches a builder.
+ */
+export type WorkspaceLayout = 'grid' | 'columns' | 'rows' | 'left' | 'down';
+
+/**
  * A user-saved pane layout: geometry plus whatever each pane's surface was
  * already running (shell/cwd/startupCommands) at the moment it was captured
  * from a live workspace. Multiple can be saved; one may be marked the default
@@ -351,6 +365,13 @@ export interface WorkspaceInfo {
   explorerWidth?: number;
   /** Expanded dirs by root path, POSIX separators. Capped at 8 roots, LRU. */
   explorerExpanded?: Record<string, string[]>;
+  /**
+   * Whether the explorer lists dotfiles and filtered names. Per-workspace, the
+   * same scope as `explorerOpen` and `explorerWidth` — the panel is a view onto
+   * one workspace's tree, so a repo where `.github/` matters does not drag a
+   * repo where it is noise along with it.
+   */
+  explorerShowHidden?: boolean;
 }
 
 // Surface
@@ -490,6 +511,7 @@ export interface SavedSession {
     explorerOpen?: boolean;
     explorerWidth?: number;
     explorerExpanded?: Record<string, string[]>;
+    explorerShowHidden?: boolean;
     pinned?: boolean;
   }>;
   sidebarWidth: number;
@@ -732,6 +754,10 @@ export const IPC_CHANNELS = {
   // Orchestration (wmux-orchestrator plugin state broadcast)
   ORCHESTRATION_UPDATE: 'orchestration:update',
   ORCHESTRATION_CLEAR: 'orchestration:clear',
+  // In-app release notes (issue #211). Distinct from the UPDATE_* family below:
+  // that one answers "is there a newer version", this one answers "what changed",
+  // including in the versions already installed.
+  CHANGELOG_GET: 'changelog:get',
   // App update notification (GitHub releases polling — badge in the titlebar)
   UPDATE_AVAILABLE: 'update:available',
   UPDATE_GET_LATEST: 'update:get-latest',

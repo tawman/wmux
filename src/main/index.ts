@@ -4,6 +4,7 @@ import { sequenceFrom, splitSequencedReport } from './ssh-detect';
 import { handleDetectionV2 } from './detection-rpc';
 import { isPtyCrashGuardInstalled } from './pty-manager';
 import { logDiagnostic } from './crash-diagnostics';
+import { planQuit } from './quit-sequence';
 import { handleBrowserV2 } from './v2-browser';
 import { pickBrowserSurface } from './browser-engine-surface';
 import {
@@ -31,6 +32,7 @@ import { sessionWindows, MAX_RESTORED_WINDOWS } from './session-windows';
 import { WindowManager } from './window-manager';
 import { initAutoUpdater, requestUpdateNow, getUpdateState } from './updater';
 import { initUpdateChecker, getLatestUpdate } from './update-checker';
+import { getChangelog } from './changelog';
 import { initAgentIntegration } from './agent-integration';
 import { applyExternalActivity, markSubagentStop, markAllAgentsDone } from './claude-observer';
 import { handleAgentStateV2, setAnswerWriter } from './agent-state-rpc';
@@ -895,6 +897,38 @@ function pruneRestoredClaudeSessions(windows: SavedWindow[]): void {
   }
 }
 
+/**
+ * Record what killed main, when JS is what killed it (issue #214).
+ *
+ * `main.log` records lifecycle only, which is exactly right for the abort #150
+ * and #214 are about — that one never passes through JS, so there is nothing
+ * for a JS handler to see. But it meant a crash report could not DISTINGUISH
+ * the two: a plain uncaught exception in main and a native `__fastfail` both
+ * left the same evidence, namely a `start` line with no `will-quit` after it.
+ *
+ * `uncaughtExceptionMonitor` rather than `uncaughtException`, deliberately. The
+ * latter would SUPPRESS the crash, and "main never dies" is not a change to
+ * make as a side effect of adding a log line — it would leave the app running
+ * with whatever invariant the throw broke. The monitor observes and Node then
+ * proceeds exactly as before, so this is diagnosability at zero behaviour cost.
+ *
+ * `unhandledRejection` is deliberately NOT listened for, for the same reason
+ * inverted: under Node's default mode, a listener there does change the
+ * outcome, from a crash to silence.
+ *
+ * The message is truncated and the stack is dropped: a stack carries file paths,
+ * and a Windows path carries the user's name. The rule this file has always
+ * followed is that its output must be safe to paste at a stranger, and a
+ * crash report that first needs redacting is one nobody sends.
+ */
+process.on('uncaughtExceptionMonitor', (err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  logDiagnostic('uncaught-exception', {
+    name: err instanceof Error ? err.name : typeof err,
+    message: message.slice(0, 200).replace(/\s+/g, ' '),
+  });
+});
+
 app.whenReady().then(() => {
   // A losing second instance is already quitting; don't run startup side effects.
   if (!gotInstanceLock) return;
@@ -1042,6 +1076,11 @@ app.whenReady().then(() => {
   // Late-mounted windows query the cached latest update info so the badge
   // appears even if the GitHub poll fired before the window's renderer attached.
   ipcMain.handle(IPC_CHANNELS.UPDATE_GET_LATEST, () => getLatestUpdate());
+  // Release notes for the Changelog tab (issue #211). Takes only a refresh
+  // flag — no repo, no URL, no token: the renderer names nothing about where
+  // this comes from, so a compromised one cannot point it somewhere else.
+  ipcMain.handle(IPC_CHANNELS.CHANGELOG_GET, (_event, opts?: { refresh?: boolean }) =>
+    getChangelog({ refresh: !!opts?.refresh }));
   // Badge click — download + install in place; the renderer falls back to the
   // release page when this says it can't (issue #125).
   ipcMain.handle(IPC_CHANNELS.UPDATE_INSTALL, () => requestUpdateNow());
@@ -1779,8 +1818,21 @@ app.on('browser-window-created', (_event, win) => {
  */
 let agentBrowserTornDown = false;
 
+/**
+ * Whether a `will-quit` pass has already taken charge of finishing the quit.
+ *
+ * Separate from `agentBrowserTornDown` since #214: the quit is now deferred for
+ * PTY draining too, on machines that have never opened an agent-mode pane, so
+ * "is a teardown in flight" and "have the browser sessions been closed" stopped
+ * being the same question. Conflating them let a second pass — `app.quit()`
+ * from `window-all-closed` arriving mid-drain — fall through to the normal exit
+ * and end the drain early, which is the race this all exists to close.
+ */
+let quitDeferred = false;
+
 app.on('will-quit', (event) => {
-  logDiagnostic('will-quit', { ptys: ptyManager.count(), guard: isPtyCrashGuardInstalled() });
+  const ptysAtQuit = ptyManager.count();
+  logDiagnostic('will-quit', { ptys: ptysAtQuit, guard: isPtyCrashGuardInstalled() });
   // Kill all PTYs before anything else tears down. Without this, node-pty's
   // libuv async handles (batons) are still pending when the process exits,
   // triggering the "Assertion failed: remove_pty_baton" MSVC runtime error.
@@ -1798,21 +1850,39 @@ app.on('will-quit', (event) => {
   // one of them stops being legitimate. Not closing them here leaks a Chrome
   // per agent pane — on Windows a dead parent does not take its descendants
   // with it, which is the whole of issue #139.
-  if (agentBrowserTornDown || !agentBrowserNeedsTeardown()) return;
-  agentBrowserTornDown = true;
+  const agentBrowserPending = !agentBrowserTornDown && agentBrowserNeedsTeardown();
+  const plan = planQuit({ ptysAtQuit, agentBrowserPending, alreadyDeferred: quitDeferred });
+
+  if (!plan.defer) return;   // nothing outstanding — let Electron unwind normally
   event.preventDefault();
+  if (!plan.hardExit) return;  // a sequence is already in flight; do not restart or shorten it
+
+  quitDeferred = true;
+  if (agentBrowserPending) agentBrowserTornDown = true;
+
+  // The one place the process is allowed to leave once quit has been deferred.
+  // `app.exit()` rather than `app.quit()`: quit would re-enter this handler with
+  // nothing left for it to do, and — the point of #214 — unwinding is what lets
+  // node-pty's outstanding ConPTY exit callbacks race the environment teardown
+  // into `__fastfail`. See quit-sequence.ts.
+  const leave = (): void => {
+    logDiagnostic('exit', { via: 'app.exit', reason: plan.reason, drain: plan.drainMs });
+    app.exit(0);
+  };
 
   // Bounded twice over. `teardownAgentBrowser` caps itself, and this timer caps
   // IT — because the one outcome worse than leaking a browser is a wmux the
-  // user cannot quit. `app.exit()` rather than `app.quit()` on that path: quit
-  // would re-enter this handler and there is nothing left for it to do, since
-  // every step above has already run.
-  const forceQuit = setTimeout(() => app.exit(0), QUIT_TEARDOWN_BUDGET_MS + 2_000);
+  // user cannot quit.
+  const forceQuit = setTimeout(leave, QUIT_TEARDOWN_BUDGET_MS + 2_000);
   const finish = (): void => {
     clearTimeout(forceQuit);
-    app.quit();
+    // The drain: the PTYs were killed at the top of this handler, so their exit
+    // callbacks are already on their way. This is the window in which they can
+    // land against a healthy environment instead of a dying one.
+    setTimeout(leave, plan.drainMs);
   };
-  teardownAgentBrowser(agentBrowserTeardownDeps).then(finish, finish);
+  if (agentBrowserPending) teardownAgentBrowser(agentBrowserTeardownDeps).then(finish, finish);
+  else finish();
 });
 
 app.on('window-all-closed', () => {
